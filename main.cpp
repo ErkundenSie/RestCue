@@ -1,0 +1,752 @@
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#include <commctrl.h>
+#include <dwmapi.h>
+#include <algorithm>
+#include <cwchar>
+#include <string>
+#include <vector>
+#include "timer.hpp"
+#include "settings_store.hpp"
+#include "theme.hpp"
+#include "resource.h"
+#include <strsafe.h>
+
+#ifdef _MSC_VER
+#pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
+#endif
+
+namespace {
+constexpr wchar_t MainClass[] = L"RestCue.MainWindow";
+constexpr wchar_t OverlayClass[] = L"RestCue.Overlay";
+constexpr wchar_t RestCardClass[] = L"RestCue.RestCard";
+constexpr wchar_t SliderClass[] = L"RestCue.OpacitySlider";
+constexpr wchar_t Title[] = L"RestCue · 休息提醒";
+constexpr UINT TrayMessage = WM_APP + 1;
+constexpr UINT_PTR TickId = 1;
+constexpr int WorkEdit = 101, RestMinEdit = 102, RestSecEdit = 103, OpacityEdit = 104, OpacitySlider = 105;
+constexpr int IncreaseWork = 211, DecreaseWork = 212;
+constexpr int Apply = 201, Toggle = 202, RestNow = 203, Skip = 204;
+constexpr int Status = 301, Open = 302, Exit = 303, Stop = 304;
+
+using Settings = restcue::Settings;
+Settings settings;
+restcue::SettingsStore settingsStore;
+
+struct Control { HWND hwnd; int x, y, width, height; bool heading; };
+struct RestWindow {
+    explicit RestWindow(bool isCard) : card(isCard) {}
+    bool card;
+    restcue::theme::OverlayScene scene;
+};
+HINSTANCE instance = nullptr;
+HWND mainWindow = nullptr;
+HWND previousForeground = nullptr;
+HFONT uiFont = nullptr, headingFont = nullptr;
+HBRUSH darkBrush = nullptr, editBrush = nullptr;
+std::vector<Control> controls;
+std::vector<HWND> overlays, restCards;
+bool restoreSettingsAfterRest = false;
+restcue::Timer timer;
+std::wstring lastStatus;
+NOTIFYICONDATAW tray{};
+bool trayVisible = false;
+UINT taskbarCreated = 0;
+ULONGLONG overlayStarted = 0;
+std::uint64_t lastOverlayFrame = 0;
+
+void refresh();
+void command(int id);
+LRESULT CALLBACK overlayProc(HWND, UINT, WPARAM, LPARAM);
+LRESULT CALLBACK sliderProc(HWND, UINT, WPARAM, LPARAM);
+LRESULT CALLBACK buttonProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
+
+UINT dpiFor(HWND hwnd) {
+    using GetDpi = UINT(WINAPI*)(HWND);
+    static auto getDpi = reinterpret_cast<GetDpi>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
+    if (getDpi) return getDpi(hwnd);
+    HDC dc = GetDC(hwnd);
+    const UINT dpi = dc ? static_cast<UINT>(GetDeviceCaps(dc, LOGPIXELSY)) : 96;
+    if (dc) ReleaseDC(hwnd, dc);
+    return dpi;
+}
+
+int scaled(int value, UINT dpi) {
+    return MulDiv(value, static_cast<int>(dpi) * restcue::theme::SettingsScalePercent, 9600);
+}
+
+HICON loadAppIcon(int width, int height) {
+    HICON icon = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_RESTCUE),
+                                               IMAGE_ICON, width, height, LR_SHARED));
+    return icon ? icon : LoadIconW(nullptr, IDI_APPLICATION);
+}
+
+HFONT makeFont(int points, UINT dpi, int weight = FW_NORMAL) {
+    return CreateFontW(-MulDiv(points, static_cast<int>(dpi) * restcue::theme::SettingsScalePercent, 7200), 0, 0, 0, weight,
+                       FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
+}
+
+void layoutControls() {
+    const UINT dpi = dpiFor(mainWindow);
+    HFONT oldUi = uiFont, oldHeading = headingFont;
+    uiFont = makeFont(16, dpi);
+    headingFont = makeFont(18, dpi, FW_SEMIBOLD);
+    for (const auto& c : controls) {
+        MoveWindow(c.hwnd, scaled(c.x, dpi), scaled(c.y, dpi),
+                   scaled(c.width, dpi), scaled(c.height, dpi), TRUE);
+        SendMessageW(c.hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(c.heading ? headingFont : uiFont), TRUE);
+    }
+    if (oldUi) DeleteObject(oldUi);
+    if (oldHeading) DeleteObject(oldHeading);
+}
+
+HWND addControl(const wchar_t* cls, const wchar_t* text, int id,
+                int x, int y, int w, int h, DWORD style = 0, bool heading = false) {
+    HWND hwnd = CreateWindowExW(0,
+        cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, mainWindow,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, nullptr);
+    controls.push_back({hwnd, x, y, w, h, heading});
+    if (wcscmp(cls, L"BUTTON") == 0) SetWindowSubclass(hwnd, buttonProc, 1, 0);
+    return hwnd;
+}
+
+void setNumber(int id, unsigned value) {
+    SetDlgItemTextW(mainWindow, id, std::to_wstring(value).c_str());
+}
+
+bool readNumber(int id, unsigned& value) {
+    wchar_t text[32]{};
+    const int length = GetWindowTextLengthW(GetDlgItem(mainWindow, id));
+    if (length < 1 || length > 6) return false;
+    GetDlgItemTextW(mainWindow, id, text, 32);
+    value = 0;
+    for (int i = 0; i < length; ++i) {
+        if (text[i] < L'0' || text[i] > L'9') return false;
+        value = value * 10 + static_cast<unsigned>(text[i] - L'0');
+    }
+    return true;
+}
+
+void loadSettings() {
+    settingsStore = restcue::SettingsStore::forApplication();
+    settings = settingsStore.load();
+}
+
+bool applySettings() {
+    unsigned work = 0, minutes = 0, seconds = 0, opacity = 0;
+    if (!readNumber(WorkEdit, work) || !readNumber(RestMinEdit, minutes) ||
+        !readNumber(RestSecEdit, seconds) || !readNumber(OpacityEdit, opacity) ||
+        work < 1 || work > 1440 || minutes > 120 || seconds > 59 ||
+        minutes * 60 + seconds < 1 || minutes * 60 + seconds > 7200 ||
+        opacity < 10 || opacity > 95) {
+        MessageBoxW(mainWindow,
+            L"请输入有效设置：\n\n工作间隔：1～1440 分钟\n休息时长：1 秒～120 分钟（秒数填 0～59）\n遮罩浓度：10～95%",
+            Title, MB_OK | MB_ICONWARNING);
+        return false;
+    }
+    Settings updated{work, minutes * 60 + seconds, opacity};
+    const auto saved = settingsStore.save(updated);
+    if (!saved.success) {
+        std::wstring message = L"无法保存设置。本次运行仍会生效，但重启后可能无法恢复。\n\n";
+        for (const auto& failure : saved.failures) {
+            wchar_t description[512]{};
+            FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                nullptr, failure.error, 0, description, ARRAYSIZE(description), nullptr);
+            message += failure.path + L"\n错误 " + std::to_wstring(failure.error) + L"：" + description + L"\n";
+        }
+        message += L"请检查上述目录的写入权限或文件是否只读；可将程序放在可写目录中运行。";
+        MessageBoxW(mainWindow, message.c_str(), Title, MB_OK | MB_ICONWARNING);
+    }
+    settings = updated;
+    return true;
+}
+
+void createControls() {
+    namespace layout = restcue::theme::settingsLayout;
+    const DWORD editStyle = WS_TABSTOP | ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL;
+    const DWORD buttonStyle = WS_TABSTOP | BS_OWNERDRAW;
+    auto add = [&](const wchar_t* cls, const wchar_t* label, int id, layout::Placement p, DWORD style) {
+        return addControl(cls, label, id, p.x, p.y, p.width, p.height, style);
+    };
+    add(L"EDIT", L"", WorkEdit, layout::Work, editStyle);
+    add(L"BUTTON", L"增加专注分钟", IncreaseWork, layout::WorkUp, BS_OWNERDRAW);
+    add(L"BUTTON", L"减少专注分钟", DecreaseWork, layout::WorkDown, BS_OWNERDRAW);
+    add(L"EDIT", L"", RestMinEdit, layout::RestMinutes, editStyle);
+    add(L"EDIT", L"", RestSecEdit, layout::RestSeconds, editStyle);
+    add(SliderClass, L"遮罩浓度", OpacitySlider, layout::OpacityTrack, WS_TABSTOP);
+    add(L"EDIT", L"", OpacityEdit, layout::OpacityValue, editStyle);
+    // Retain a standard text control for automation/accessibility status queries.
+    addControl(L"STATIC", L"", Status, 0, 0, 0, 0);
+    add(L"BUTTON", L"保存并开始", Apply, layout::Apply, buttonStyle);
+    add(L"BUTTON", L"暂停", Toggle, layout::Pause, buttonStyle);
+    add(L"BUTTON", L"立即休息", RestNow, layout::Rest, buttonStyle);
+    add(L"BUTTON", L"跳过休息", Skip, layout::Skip, buttonStyle);
+    for (int id : {WorkEdit, RestMinEdit, RestSecEdit, OpacityEdit}) {
+        SendDlgItemMessageW(mainWindow, id, EM_SETLIMITTEXT, 6, 0);
+    }
+    setNumber(WorkEdit, settings.workMinutes);
+    setNumber(RestMinEdit, settings.restSeconds / 60);
+    setNumber(RestSecEdit, settings.restSeconds % 60);
+    setNumber(OpacityEdit, settings.opacity);
+    layoutControls();
+}
+
+void addTray() {
+    tray = {};
+    tray.cbSize = sizeof(tray);
+    tray.hWnd = mainWindow;
+    tray.uID = 1;
+    tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    tray.uCallbackMessage = TrayMessage;
+    tray.hIcon = loadAppIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+    StringCchCopyW(tray.szTip, ARRAYSIZE(tray.szTip), Title);
+    trayVisible = Shell_NotifyIconW(NIM_ADD, &tray) != FALSE;
+    if (!trayVisible) {
+        // Never leave an invisible application that the user cannot reopen.
+        ShowWindow(mainWindow, SW_RESTORE);
+    }
+}
+
+std::wstring clockText(std::uint64_t milliseconds) {
+    const auto seconds = (milliseconds + 999) / 1000;
+    wchar_t buffer[40]{};
+    swprintf_s(buffer, ARRAYSIZE(buffer), L"%02llu:%02llu",
+               static_cast<unsigned long long>(seconds / 60),
+               static_cast<unsigned long long>(seconds % 60));
+    return buffer;
+}
+
+void showMain() {
+    ShowWindow(mainWindow, SW_RESTORE);
+    SetForegroundWindow(mainWindow);
+}
+
+bool ownsOverlay(HWND hwnd) {
+    return std::find(overlays.begin(), overlays.end(), hwnd) != overlays.end() ||
+           std::find(restCards.begin(), restCards.end(), hwnd) != restCards.end();
+}
+
+void hideOverlays() {
+    const bool restoreFocus = ownsOverlay(GetForegroundWindow());
+    const bool restoreSettings = restoreSettingsAfterRest;
+    restoreSettingsAfterRest = false;
+    for (HWND hwnd : restCards) DestroyWindow(hwnd);
+    restCards.clear();
+    for (HWND hwnd : overlays) DestroyWindow(hwnd);
+    overlays.clear();
+    if (restoreSettings && IsWindow(mainWindow)) ShowWindow(mainWindow, SW_SHOWNOACTIVATE);
+    if (restoreFocus && IsWindow(previousForeground)) SetForegroundWindow(previousForeground);
+    previousForeground = nullptr;
+}
+
+void roundRestCard(HWND hwnd) {
+    RECT rect{};
+    GetClientRect(hwnd, &rect);
+    const int diameter = std::max(1, MulDiv(std::min(rect.right, rect.bottom), 48, 320));
+    HRGN region = CreateRoundRectRgn(0, 0, rect.right + 1, rect.bottom + 1, diameter, diameter);
+    if (region && !SetWindowRgn(hwnd, region, TRUE)) DeleteObject(region);
+}
+
+BOOL CALLBACK createMonitorOverlay(HMONITOR, HDC, LPRECT rect, LPARAM) {
+    HWND shade = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        OverlayClass, L"RestCue 休息遮罩", WS_POPUP,
+        rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top,
+        mainWindow, nullptr, instance, nullptr);
+    if (!shade) return TRUE;
+    SetLayeredWindowAttributes(shade, 0, 0, LWA_ALPHA);
+    overlays.push_back(shade);
+    ShowWindow(shade, SW_SHOWNOACTIVATE);
+
+    const auto bounds = restcue::theme::restCardBounds(*rect, dpiFor(shade));
+    HWND card = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        RestCardClass, L"RestCue 休息倒计时", WS_POPUP,
+        bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
+        shade, nullptr, instance, reinterpret_cast<LPVOID>(1));
+    if (card) {
+        SetLayeredWindowAttributes(card, 0, 0, LWA_ALPHA);
+        roundRestCard(card);
+        restCards.push_back(card);
+        ShowWindow(card, SW_SHOWNOACTIVATE);
+    }
+    return TRUE;
+}
+
+void showOverlays() {
+    previousForeground = GetForegroundWindow();
+    overlayStarted = GetTickCount64();
+    lastOverlayFrame = 0;
+    restoreSettingsAfterRest = trayVisible && IsWindowVisible(mainWindow) && !IsIconic(mainWindow);
+    if (restoreSettingsAfterRest) ShowWindow(mainWindow, SW_HIDE);
+    EnumDisplayMonitors(nullptr, nullptr, createMonitorOverlay, 0);
+    if (overlays.empty() && restoreSettingsAfterRest) {
+        ShowWindow(mainWindow, SW_SHOWNOACTIVATE);
+        restoreSettingsAfterRest = false;
+    }
+    // Shade opacity follows the user's setting; the separate card stays readable.
+}
+
+void refresh() {
+    const auto now = GetTickCount64();
+    timer.tick(now);
+    const auto phase = timer.phase();
+    if (phase == restcue::Phase::Resting) {
+        if (overlays.empty()) showOverlays();
+        const auto remaining = timer.remaining(now);
+        const auto alpha = restcue::fadeAlpha(now >= overlayStarted ? now - overlayStarted : 0,
+                                               remaining, timer.restDuration(), settings.opacity);
+        const auto frame = now / 100;
+        for (HWND hwnd : overlays) SetLayeredWindowAttributes(hwnd, 0, static_cast<BYTE>(alpha), LWA_ALPHA);
+        const auto cardAlpha = restcue::fadeAlpha(now >= overlayStarted ? now - overlayStarted : 0,
+                                                  remaining, timer.restDuration(), 100);
+        for (HWND hwnd : restCards) {
+            SetLayeredWindowAttributes(hwnd, 0, static_cast<BYTE>(cardAlpha), LWA_ALPHA);
+            if (frame != lastOverlayFrame) InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        lastOverlayFrame = frame;
+    } else if (!overlays.empty() || !restCards.empty()) {
+        hideOverlays();
+    }
+
+    std::wstring text;
+    switch (phase) {
+    case restcue::Phase::Working: text = L"工作中 · 距离下次休息 " + clockText(timer.remaining(now)); break;
+    case restcue::Phase::Resting: text = L"休息中 · 剩余 " + clockText(timer.remaining(now)); break;
+    case restcue::Phase::Paused: text = L"已暂停 · 剩余 " + clockText(timer.remaining(now)); break;
+    default: text = L"已停止 · 点击“保存并开始”启用提醒"; break;
+    }
+    if (text != lastStatus) {
+        SetDlgItemTextW(mainWindow, Status, text.c_str());
+        lastStatus = text;
+        RECT badge{scaled(555, dpiFor(mainWindow)), scaled(25, dpiFor(mainWindow)), scaled(785, dpiFor(mainWindow)), scaled(135, dpiFor(mainWindow))};
+        InvalidateRect(mainWindow, &badge, FALSE);
+        if (trayVisible) {
+            StringCchCopyW(tray.szTip, ARRAYSIZE(tray.szTip), (L"RestCue · " + text).c_str());
+            tray.uFlags = NIF_TIP;
+            Shell_NotifyIconW(NIM_MODIFY, &tray);
+        }
+    }
+    const wchar_t* label = phase == restcue::Phase::Paused ? L"继续" : L"暂停";
+    wchar_t current[16]{};
+    GetDlgItemTextW(mainWindow, Toggle, current, ARRAYSIZE(current));
+    if (wcscmp(label, current) != 0) SetDlgItemTextW(mainWindow, Toggle, label);
+    const bool canPause = phase != restcue::Phase::Stopped, canSkip = phase == restcue::Phase::Resting;
+    if ((IsWindowEnabled(GetDlgItem(mainWindow, Toggle)) != FALSE) != canPause) EnableWindow(GetDlgItem(mainWindow, Toggle), canPause);
+    if ((IsWindowEnabled(GetDlgItem(mainWindow, Skip)) != FALSE) != canSkip) EnableWindow(GetDlgItem(mainWindow, Skip), canSkip);
+}
+
+void trayMenu() {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+    const auto phase = timer.phase();
+    AppendMenuW(menu, MF_STRING, Open, L"打开设置");
+    AppendMenuW(menu, MF_STRING | (phase == restcue::Phase::Stopped ? MF_GRAYED : 0), Toggle,
+                phase == restcue::Phase::Paused ? L"继续提醒" : L"暂停提醒");
+    AppendMenuW(menu, MF_STRING, RestNow, L"立即休息");
+    AppendMenuW(menu, MF_STRING | (phase == restcue::Phase::Resting ? 0 : MF_GRAYED), Skip, L"跳过本次休息");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, Exit, L"退出");
+    POINT point{};
+    GetCursorPos(&point);
+    SetForegroundWindow(mainWindow);
+    const int id = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                                  point.x, point.y, 0, mainWindow, nullptr);
+    PostMessageW(mainWindow, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+    if (id) command(id);
+}
+
+void command(int id) {
+    const auto now = GetTickCount64();
+    switch (id) {
+    case Apply:
+        if (!applySettings()) return;
+        timer.start(GetTickCount64(), static_cast<std::uint64_t>(settings.workMinutes) * 60000,
+                    static_cast<std::uint64_t>(settings.restSeconds) * 1000);
+        break;
+    case Toggle:
+        if (timer.phase() == restcue::Phase::Paused) timer.resume(now);
+        else timer.pause(now);
+        break;
+    case RestNow:
+        // Preview uses the saved/applied configuration, not uncommitted edits.
+        hideOverlays();
+        timer.restNow(now);
+        break;
+    case Skip: timer.skipRest(now); break;
+    case Stop: timer.stop(); break;
+    case IncreaseWork:
+    case DecreaseWork: {
+        unsigned value = 1;
+        readNumber(WorkEdit, value);
+        const int next = std::clamp(static_cast<int>(value) + (id == IncreaseWork ? 1 : -1), 1, 1440);
+        setNumber(WorkEdit, static_cast<unsigned>(next));
+        break;
+    }
+    case Open: showMain(); break;
+    case Exit: DestroyWindow(mainWindow); return;
+    default: return;
+    }
+    refresh();
+}
+
+void drawMain(HDC dc) {
+    RECT client{};
+    GetClientRect(mainWindow, &client);
+    restcue::theme::Surface buffer;
+    if (!buffer.resize(dc, client.right, client.bottom)) return;
+    std::wstring phase;
+    switch (timer.phase()) {
+    case restcue::Phase::Working: phase = L"工作中 · 距离休息"; break;
+    case restcue::Phase::Resting: phase = L"休息中 · 剩余时间"; break;
+    case restcue::Phase::Paused: phase = L"已暂停 · 剩余时间"; break;
+    default: phase = L"已停止提醒"; break;
+    }
+    {
+        Gdiplus::Graphics graphics(buffer.dc());
+        restcue::theme::mainPanel(graphics, dpiFor(mainWindow) / 96.0f * restcue::theme::SettingsScale, phase,
+            clockText(timer.remaining(GetTickCount64())),
+            timer.phase() == restcue::Phase::Working || timer.phase() == restcue::Phase::Resting,
+            GetDlgCtrlID(GetFocus()));
+    }
+    BitBlt(dc, 0, 0, client.right, client.bottom, buffer.dc(), 0, 0, SRCCOPY);
+}
+
+void drawButton(const DRAWITEMSTRUCT& item) {
+    wchar_t label[80]{};
+    GetWindowTextW(item.hwndItem, label, ARRAYSIZE(label));
+    RECT bounds{};
+    GetClientRect(item.hwndItem, &bounds);
+    const Gdiplus::RectF rect(0, 0, static_cast<float>(bounds.right), static_cast<float>(bounds.bottom));
+    POINT point{};
+    GetCursorPos(&point);
+    ScreenToClient(item.hwndItem, &point);
+    if (item.CtlID == IncreaseWork || item.CtlID == DecreaseWork) {
+        restcue::theme::stepper(item.hDC, rect, item.CtlID == IncreaseWork,
+            !(item.itemState & ODS_DISABLED), (item.itemState & ODS_SELECTED) != 0,
+            PtInRect(&bounds, point) != FALSE, (item.itemState & ODS_FOCUS) != 0);
+        return;
+    }
+    restcue::theme::button(item.hDC, rect, label, item.CtlID == Apply,
+        !(item.itemState & ODS_DISABLED), (item.itemState & ODS_SELECTED) != 0,
+        PtInRect(&bounds, point) != FALSE, (item.itemState & ODS_FOCUS) != 0);
+}
+
+LRESULT CALLBACK buttonProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR id, DWORD_PTR) {
+    if (message == WM_MOUSEMOVE) {
+        TRACKMOUSEEVENT tracking{sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0};
+        TrackMouseEvent(&tracking);
+        InvalidateRect(hwnd, nullptr, FALSE);
+    } else if (message == WM_MOUSELEAVE || message == WM_SETFOCUS || message == WM_KILLFOCUS) {
+        InvalidateRect(hwnd, nullptr, FALSE);
+    } else if (message == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, buttonProc, id);
+    }
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+LRESULT CALLBACK sliderProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    unsigned value = settings.opacity;
+    unsigned input = 0;
+    if (readNumber(OpacityEdit, input)) value = std::clamp(input, 10U, 95U);
+    auto fromPoint = [&] {
+        RECT rect{};
+        GetClientRect(hwnd, &rect);
+        const float edge = rect.bottom * .5f;
+        const int x = static_cast<short>(LOWORD(lParam));
+        const float fraction = (x - edge) / std::max(1.0f, rect.right - edge * 2);
+        const auto next = static_cast<unsigned>(std::clamp(static_cast<int>(std::lround(10 + 85 * fraction)), 10, 95));
+        setNumber(OpacityEdit, next);
+    };
+    switch (message) {
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT rect{};
+        GetClientRect(hwnd, &rect);
+        restcue::theme::Surface buffer;
+        if (buffer.resize(dc, rect.right, rect.bottom)) {
+            restcue::theme::slider(buffer.dc(), rect.right, rect.bottom, value, GetFocus() == hwnd);
+            BitBlt(dc, 0, 0, rect.right, rect.bottom, buffer.dc(), 0, 0, SRCCOPY);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND: return 1;
+    case WM_GETDLGCODE: return DLGC_WANTARROWS;
+    case WM_LBUTTONDOWN: SetFocus(hwnd); SetCapture(hwnd); fromPoint(); return 0;
+    case WM_MOUSEMOVE: if (GetCapture() == hwnd) fromPoint(); return 0;
+    case WM_LBUTTONUP: if (GetCapture() == hwnd) { fromPoint(); ReleaseCapture(); } return 0;
+    case WM_KEYDOWN: {
+        int next = static_cast<int>(value);
+        switch (wParam) {
+        case VK_LEFT: case VK_DOWN: --next; break;
+        case VK_RIGHT: case VK_UP: ++next; break;
+        case VK_HOME: next = 10; break;
+        case VK_END: next = 95; break;
+        case VK_PRIOR: next += 10; break;
+        case VK_NEXT: next -= 10; break;
+        default: return DefWindowProcW(hwnd, message, wParam, lParam);
+        }
+        setNumber(OpacityEdit, static_cast<unsigned>(std::clamp(next, 10, 95)));
+        return 0;
+    }
+    case WM_MOUSEWHEEL:
+        setNumber(OpacityEdit, static_cast<unsigned>(std::clamp(static_cast<int>(value) +
+            (static_cast<short>(HIWORD(wParam)) > 0 ? 1 : -1), 10, 95)));
+        return 0;
+    case WM_SETFOCUS: case WM_KILLFOCUS:
+        InvalidateRect(hwnd, nullptr, FALSE);
+        InvalidateRect(mainWindow, nullptr, FALSE);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+void drawRestSurface(HWND hwnd, HDC dc) {
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    auto* state = reinterpret_cast<RestWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!state) return;
+    if (state->card) {
+        const auto remaining = timer.remaining(GetTickCount64());
+        state->scene.paintCard(dc, client.right, client.bottom, clockText(remaining),
+            static_cast<float>(remaining) / static_cast<float>(timer.restDuration()));
+    } else {
+        state->scene.paintShade(dc, client.right, client.bottom);
+    }
+}
+
+void drawOverlay(HWND hwnd) {
+    PAINTSTRUCT ps{};
+    HDC dc = BeginPaint(hwnd, &ps);
+    drawRestSurface(hwnd, dc);
+    EndPaint(hwnd, &ps);
+}
+
+LRESULT CALLBACK overlayProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    switch (message) {
+    case WM_CREATE: {
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(new RestWindow(create->lpCreateParams != nullptr)));
+        return 0;
+    }
+    case WM_NCDESTROY:
+        delete reinterpret_cast<RestWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        break;
+    case WM_PAINT: drawOverlay(hwnd); return 0;
+    case WM_PRINTCLIENT: drawRestSurface(hwnd, reinterpret_cast<HDC>(wParam)); return 0;
+    case WM_ERASEBKGND: return 1;
+    case WM_LBUTTONUP: return 0;
+    case WM_SETCURSOR:
+        SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+        return TRUE;
+    case WM_RBUTTONUP: PostMessageW(mainWindow, WM_COMMAND, Skip, 0); return 0;
+    case WM_CLOSE: PostMessageW(mainWindow, WM_COMMAND, Skip, 0); return 0;
+    case WM_DPICHANGED: {
+        const RECT* rect = reinterpret_cast<RECT*>(lParam);
+        SetWindowPos(hwnd, HWND_TOPMOST, rect->left, rect->top, rect->right - rect->left,
+                     rect->bottom - rect->top, SWP_NOACTIVATE);
+        const auto* state = reinterpret_cast<RestWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (state && state->card) roundRestCard(hwnd);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+LRESULT CALLBACK mainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (taskbarCreated && message == taskbarCreated) {
+        addTray();
+        lastStatus.clear();
+        refresh();
+        return 0;
+    }
+    switch (message) {
+    case WM_CREATE: {
+        mainWindow = hwnd;
+        darkBrush = CreateSolidBrush(restcue::theme::Background);
+        editBrush = CreateSolidBrush(restcue::theme::EditBackground);
+        BOOL dark = FALSE;
+        DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
+        COLORREF caption = restcue::theme::Background, foreground = restcue::theme::Foreground;
+        DwmSetWindowAttribute(hwnd, 35, &caption, sizeof(caption));
+        DwmSetWindowAttribute(hwnd, 36, &foreground, sizeof(foreground));
+        createControls();
+        addTray();
+        timer.start(GetTickCount64(), static_cast<std::uint64_t>(settings.workMinutes) * 60000,
+                    static_cast<std::uint64_t>(settings.restSeconds) * 1000);
+        if (!SetTimer(hwnd, TickId, 50, nullptr)) return -1;
+        refresh();
+        return 0;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hwnd, &ps);
+        drawMain(dc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_PRINTCLIENT: drawMain(reinterpret_cast<HDC>(wParam)); return 0;
+    case WM_ERASEBKGND: return 1;
+    case WM_DRAWITEM:
+        if (wParam) { drawButton(*reinterpret_cast<DRAWITEMSTRUCT*>(lParam)); return TRUE; }
+        break;
+    case WM_TIMER: if (wParam == TickId) refresh(); return 0;
+    case WM_COMMAND:
+        if (HIWORD(wParam) == BN_CLICKED) command(LOWORD(wParam));
+        else if (LOWORD(wParam) == OpacityEdit && HIWORD(wParam) == EN_CHANGE)
+            InvalidateRect(GetDlgItem(hwnd, OpacitySlider), nullptr, FALSE);
+        else if (HIWORD(wParam) == EN_SETFOCUS || HIWORD(wParam) == EN_KILLFOCUS)
+            InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    case TrayMessage:
+        if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK || lParam == NIN_KEYSELECT) showMain();
+        else if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU) trayMenu();
+        return 0;
+    case WM_SIZE:
+        if (wParam == SIZE_MINIMIZED) restoreSettingsAfterRest = false;
+        if (wParam == SIZE_MINIMIZED && trayVisible) ShowWindow(hwnd, SW_HIDE);
+        return 0;
+    case WM_DPICHANGED: {
+        const RECT* rect = reinterpret_cast<RECT*>(lParam);
+        SetWindowPos(hwnd, nullptr, rect->left, rect->top, rect->right - rect->left,
+                     rect->bottom - rect->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        layoutControls();
+        return 0;
+    }
+    case WM_DISPLAYCHANGE:
+        if (!overlays.empty()) hideOverlays();
+        refresh();
+        return 0;
+    case WM_POWERBROADCAST:
+        if (wParam == PBT_APMSUSPEND) hideOverlays();
+        if (wParam == PBT_APMRESUMEAUTOMATIC || wParam == PBT_APMRESUMESUSPEND) {
+            timer.onSystemResume(GetTickCount64());
+            refresh();
+        }
+        return TRUE;
+    case WM_CTLCOLOREDIT:
+        SetTextColor(reinterpret_cast<HDC>(wParam), restcue::theme::Foreground);
+        SetBkColor(reinterpret_cast<HDC>(wParam), restcue::theme::EditBackground);
+        return reinterpret_cast<LRESULT>(editBrush);
+    case WM_CTLCOLORSTATIC:
+        SetTextColor(reinterpret_cast<HDC>(wParam), restcue::theme::Foreground);
+        SetBkColor(reinterpret_cast<HDC>(wParam), restcue::theme::Background);
+        return reinterpret_cast<LRESULT>(darkBrush);
+    case WM_CLOSE:
+        restoreSettingsAfterRest = false;
+        if (trayVisible) ShowWindow(hwnd, SW_HIDE);
+        else DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        restoreSettingsAfterRest = false;
+        KillTimer(hwnd, TickId);
+        hideOverlays();
+        if (trayVisible) Shell_NotifyIconW(NIM_DELETE, &tray);
+        if (uiFont) DeleteObject(uiFont);
+        if (headingFont) DeleteObject(headingFont);
+        if (darkBrush) DeleteObject(darkBrush);
+        if (editBrush) DeleteObject(editBrush);
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+} // namespace
+
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int showCommand) {
+    instance = hInstance;
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\RestCue.SingleInstance");
+    if (!mutex) return 1;
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND existing = FindWindowW(MainClass, nullptr);
+        if (existing) { ShowWindow(existing, SW_RESTORE); SetForegroundWindow(existing); }
+        CloseHandle(mutex);
+        return 0;
+    }
+    restcue::theme::Runtime graphics;
+    if (!graphics.ok()) {
+        MessageBoxW(nullptr, L"无法初始化图形绘制引擎。", Title, MB_OK | MB_ICONERROR);
+        CloseHandle(mutex);
+        return 1;
+    }
+    INITCOMMONCONTROLSEX common{sizeof(INITCOMMONCONTROLSEX), ICC_STANDARD_CLASSES};
+    InitCommonControlsEx(&common);
+    using SetAwareness = BOOL(WINAPI*)(HANDLE);
+    auto setAwareness = reinterpret_cast<SetAwareness>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext"));
+    if (!setAwareness || !setAwareness(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4)))) SetProcessDPIAware();
+    loadSettings();
+    taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+
+    WNDCLASSEXW cls{};
+    cls.cbSize = sizeof(cls);
+    cls.hInstance = instance;
+    cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    cls.hIcon = loadAppIcon(GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON));
+    cls.hIconSm = loadAppIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+    cls.hbrBackground = nullptr;
+    cls.lpszClassName = MainClass;
+    cls.lpfnWndProc = mainProc;
+    const bool registeredMain = RegisterClassExW(&cls) != 0;
+    cls.lpszClassName = OverlayClass;
+    cls.lpfnWndProc = overlayProc;
+    cls.hbrBackground = nullptr;
+    const bool registeredOverlay = RegisterClassExW(&cls) != 0;
+    cls.lpszClassName = RestCardClass;
+    const bool registeredRestCard = RegisterClassExW(&cls) != 0;
+    cls.lpszClassName = SliderClass;
+    cls.lpfnWndProc = sliderProc;
+    const bool registeredSlider = RegisterClassExW(&cls) != 0;
+    if (!registeredMain || !registeredOverlay || !registeredRestCard || !registeredSlider) {
+        MessageBoxW(nullptr, L"窗口初始化失败。", Title, MB_OK | MB_ICONERROR);
+        CloseHandle(mutex);
+        return 1;
+    }
+
+    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    UINT dpi = 96;
+    HDC screen = GetDC(nullptr);
+    if (screen) { dpi = static_cast<UINT>(GetDeviceCaps(screen, LOGPIXELSY)); ReleaseDC(nullptr, screen); }
+    RECT rect{0, 0, scaled(static_cast<int>(restcue::theme::MainWidth), dpi),
+                    scaled(static_cast<int>(restcue::theme::MainHeight), dpi)};
+    AdjustWindowRectEx(&rect, style, FALSE, WS_EX_CONTROLPARENT);
+    HWND hwnd = CreateWindowExW(WS_EX_CONTROLPARENT, MainClass, Title, style,
+        CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top,
+        nullptr, nullptr, instance, nullptr);
+    if (!hwnd) {
+        MessageBoxW(nullptr, L"无法创建主窗口或计时器。", Title, MB_OK | MB_ICONERROR);
+        CloseHandle(mutex);
+        return 1;
+    }
+    ShowWindow(hwnd, showCommand);
+    UpdateWindow(hwnd);
+    MSG message{};
+    BOOL result;
+    while ((result = GetMessageW(&message, nullptr, 0, 0)) > 0) {
+        if (message.message == WM_KEYDOWN && message.wParam == VK_RETURN &&
+            (message.hwnd == GetDlgItem(hwnd, WorkEdit) || message.hwnd == GetDlgItem(hwnd, RestMinEdit) ||
+             message.hwnd == GetDlgItem(hwnd, RestSecEdit) || message.hwnd == GetDlgItem(hwnd, OpacityEdit))) {
+            command(Apply);
+            continue;
+        }
+        // Only the settings window needs dialog-style Tab/Enter navigation.
+        if ((message.hwnd == hwnd || IsChild(hwnd, message.hwnd)) && IsDialogMessageW(hwnd, &message)) continue;
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+    if (IsWindow(hwnd)) DestroyWindow(hwnd);
+    CloseHandle(mutex);
+    return result == -1 ? 1 : static_cast<int>(message.wParam);
+}

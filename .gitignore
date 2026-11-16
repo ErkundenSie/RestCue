@@ -1,0 +1,8 @@
+build/
+/RestCue.exe
+/RestCue.ini
+/RestCue.ini.*.tmp
+cmake-build-*/
+*.obj
+*.pdb
+*.ilk
