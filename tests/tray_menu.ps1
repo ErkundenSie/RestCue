@@ -1,4 +1,4 @@
-param([string]$Exe = "$PSScriptRoot\..\RestCue.exe")
+param([string]$Exe = "$PSScriptRoot\..\build\Release\RestCue.exe")
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;

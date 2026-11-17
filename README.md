@@ -8,7 +8,7 @@
 
 ## 2.7 项目更名为 RestCue
 
-项目、文件夹、程序、窗口/托盘文案、C++ 命名空间、图标资源和编译脚本统一使用 RestCue。运行项目根目录的 `RestCue.exe`，配置文件为 `RestCue.ini`。
+项目、文件夹、程序、窗口/托盘文案、C++ 命名空间、图标资源和编译脚本统一使用 RestCue。编译后运行 `build\Release\RestCue.exe`，配置文件为 EXE 同目录下的 `RestCue.ini`。
 兼容读取旧版 `RestFade.ini` 与 `%LOCALAPPDATA%\RestFade\settings.ini`：优先使用有效的新配置，新配置缺失或无效时才读取旧配置；保存只写入 RestCue 路径，不修改旧文件。
 原有参数及全部交互保持不变。
 
@@ -64,7 +64,7 @@
 
 ## 使用
 
-双击项目目录中的 **`RestCue.exe`**。默认每工作 45 分钟，休息 5 分钟；打开软件即开始计时。
+编译后双击 **`build\Release\RestCue.exe`**（分发包中直接运行 `RestCue.exe`）。默认每工作 45 分钟，休息 5 分钟；打开软件即开始计时。
 
 - **工作间隔**：1～1440 分钟。
 - **休息时长**：分别填写分钟和秒，总时长 1 秒～120 分钟。
@@ -111,19 +111,27 @@ build.bat
 ```
 
 也支持将 MinGW-w64 的 `g++` 或 Zig 的 `zig` 加入 PATH 后运行同一脚本。
-脚本会编译程序和图标资源、运行计时器及配置保存测试，输出到 `build\`，并将可运行的 `RestCue.exe` 复制到项目根目录。
+脚本会编译程序和图标资源、运行计时器、配置保存及透明圆环绘制测试，全部输出到 `build\Release\`，不再向项目根目录复制 EXE。
 Visual Studio 需要 `rc.exe`，MinGW-w64 需要 `windres.exe`，Zig 自带 `zig rc`。
 
 ### CMake
 
 ```bat
-cmake -S . -B build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-Visual Studio 生成器的程序在 `build\Release\RestCue.exe`。
+各生成器的正式版程序均在 `build\Release\RestCue.exe`；调试版在 `build\Debug\`（Visual Studio 使用 `--config Debug`，单配置生成器配置时使用 `-DCMAKE_BUILD_TYPE=Debug`）。
 非 Windows 环境下 CMake 只构建独立计时器测试。
+
+### 输出与分发
+
+- `build\Release\`：正式版程序、测试程序和编译中间文件。
+- `build\Debug\`：CMake 调试版输出。
+- `dist\`：需要分发时，将 `build\Release\RestCue.exe` 和 `README.md` 复制到此目录，再打包为 ZIP；无需分发测试程序或中间文件。
+
+`build\` 和 `dist\` 均已加入 `.gitignore`，源码目录不保存编译好的程序。
 
 ## 界面测试
 

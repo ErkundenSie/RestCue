@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 project(RestCue VERSION 2.7 LANGUAGES CXX)
 
+if(NOT CMAKE_CONFIGURATION_TYPES AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build configuration" FORCE)
+endif()
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>")
+
 include(CTest)
 if(BUILD_TESTING)
     add_executable(timer_tests tests/timer_tests.cpp)
