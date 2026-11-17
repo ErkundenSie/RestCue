@@ -69,7 +69,7 @@ int main() {
     const RECT monitor{0, 0, 1280, 800};
     const auto bounds = restCardBounds(monitor, 120);
     const auto* restCard = scene.renderCard(overlay.dc(), bounds.right - bounds.left,
-        bounds.bottom - bounds.top, L"04:49", .72f);
+        bounds.bottom - bounds.top, L"04:49", .72f, 289000);
     if (!restCard) return 3;
     Gdiplus::Bitmap cardImage(restCard->width(), restCard->height(), restCard->width() * 4,
                               PixelFormat32bppPARGB, restCard->bits());

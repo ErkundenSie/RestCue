@@ -200,11 +200,12 @@ try {
     $dragged = [int][RestCueSmoke]::Text([RestCueSmoke]::GetDlgItem($main, 104))
     Check ($dragged -ge 51 -and $dragged -le 54) 'slider mouse input updates the percentage'
     Set-Field 104 '60'
+    $startupChecked = [RestCueSmoke]::SendMessage([RestCueSmoke]::GetDlgItem($main, 206), 0xF0, [IntPtr]::Zero, [IntPtr]::Zero).ToInt32()
     Cmd 201
     Check ([RestCueSmoke]::GetPrivateProfileInt('Timer', 'WorkMinutes', -1, $config) -eq 1) 'work interval is saved'
     Check ([RestCueSmoke]::GetPrivateProfileInt('Timer', 'RestSeconds', -1, $config) -eq 4) 'break duration is saved'
     Check ([RestCueSmoke]::GetPrivateProfileInt('Timer', 'Opacity', -1, $config) -eq 60) 'opacity is saved'
-    Check ([RestCueSmoke]::GetPrivateProfileInt('Timer', 'LaunchAtStartup', -1, $config) -eq 0) 'startup stays off unless enabled'
+    Check ([RestCueSmoke]::GetPrivateProfileInt('Timer', 'LaunchAtStartup', -1, $config) -eq $startupChecked) 'saving preserves the selected startup state'
     # Repeated saves must not warn, and a new process must restore every field.
     Cmd 201
     Cmd 303

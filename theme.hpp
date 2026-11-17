@@ -310,6 +310,10 @@ inline void slider(HDC dc, int width, int height, unsigned opacity, bool focused
 constexpr float RestCueWidth = 440, RestCueHeight = 500;
 constexpr float RestRingCenter = 220;
 
+inline const wchar_t* restCueCaption(std::uint64_t remainingMs) {
+    return remainingMs <= 15000 ? L"休息中 · 即将恢复" : L"休息一下，看看远处";
+}
+
 inline RECT restCardBounds(const RECT& monitor, UINT dpi) {
     const int screenW = monitor.right - monitor.left, screenH = monitor.bottom - monitor.top;
     const float scale = std::max(0.01f, std::min({dpi / 96.0f,
@@ -332,14 +336,14 @@ public:
             Graphics g(shade_.dc());
             setup(g);
             LinearGradientBrush veil(PointF(0, 0), PointF(static_cast<float>(width), static_cast<float>(height)),
-                Color(255, 24, 32, 48), Color(255, 37, 45, 61));
+                Color(255, 12, 20, 26), Color(255, 20, 30, 36));
             g.FillRectangle(&veil, 0, 0, width, height);
         }
         BitBlt(target, 0, 0, width, height, shade_.dc(), 0, 0, SRCCOPY);
     }
 
     const Surface* renderCard(HDC reference, int width, int height, const std::wstring& countdown,
-                              float progress, bool forced = false) {
+                              float progress, std::uint64_t remainingMs, bool forced = false) {
         if (!card_.resize(reference, width, height)) return nullptr;
         // Draw directly into premultiplied pixels. ClearType/DC painting cannot preserve
         // alpha, and would leave a solid disc or black fringes on a layered window.
@@ -350,11 +354,13 @@ public:
         g.Clear(Color(0, 0, 0, 0));
         const float scale = std::min(width / RestCueWidth, height / RestCueHeight);
         g.ScaleTransform(scale, scale);
-        constexpr float center = RestRingCenter, radius = 196, stroke = 20;
+        constexpr float center = RestRingCenter, radius = 196, stroke = 28;
         Pen track(Color(70, 255, 255, 255), stroke);
         g.DrawEllipse(&track, center - radius, center - radius, radius * 2, radius * 2);
-        LinearGradientBrush green(PointF(center, center - radius), PointF(center, center + radius),
-                                  Color(255, 153, 255, 79), Color(255, 20, 230, 88));
+        // Cover the outer stroke too, so the gradient cannot wrap at the ring edges.
+        LinearGradientBrush green(PointF(center, center - radius - stroke / 2),
+                                  PointF(center, center + radius + stroke / 2),
+                                  Color(255, 145, 196, 173), Color(255, 92, 159, 131));
         Pen arc(&green, stroke);
         arc.SetStartCap(LineCapRound); arc.SetEndCap(LineCapRound);
         const float sweep = std::clamp(progress, 0.0f, 1.0f) * 360.0f;
@@ -364,21 +370,22 @@ public:
             g.DrawArc(&arc, center - radius, center - radius, radius * 2, radius * 2, -90.0f, sweep);
         text(g, countdown, RectF(18, 145, 404, 100), 84, Color(255, 255, 255, 255),
              true, StringAlignmentCenter, L"Segoe UI");
-        text(g, L"休息中 · 即将恢复", RectF(30, 264, 380, 38), 24,
-             Color(245, 255, 255, 255), false, StringAlignmentCenter);
-        const Color white(245, 255, 255, 255);
+        text(g, restCueCaption(remainingMs), RectF(30, 252, 380, 38), 24,
+             Color(224, 255, 255, 255), false, StringAlignmentCenter);
+        const Color instruction(190, 255, 255, 255);
         if (!forced) {
             // Small mouse outline, aligned with the instruction rather than a button.
             GraphicsPath mouse;
-            rounded(mouse, RectF(67, 454, 24, 34), 12);
-            Pen outline(white, 1.8f);
+            rounded(mouse, RectF(83, 455, 20, 28), 10);
+            Pen outline(instruction, 1.5f);
             g.DrawPath(&outline, &mouse);
-            g.DrawLine(&outline, 67.0f, 468.0f, 91.0f, 468.0f);
-            g.DrawLine(&outline, 79.0f, 454.0f, 79.0f, 468.0f);
-            text(g, L"右键单击退出本次休息", RectF(104, 450, 310, 42), 22, white);
+            g.DrawLine(&outline, 83.0f, 467.0f, 103.0f, 467.0f);
+            g.DrawLine(&outline, 93.0f, 455.0f, 93.0f, 467.0f);
+            text(g, L"右键单击退出本次休息", RectF(115, 450, 242, 38), 19,
+                 instruction, false, StringAlignmentCenter);
         } else {
-            text(g, L"强制休息 · 请完成本次休息", RectF(10, 450, 420, 42), 22,
-                 white, false, StringAlignmentCenter);
+            text(g, L"强制休息 · 请完成本次休息", RectF(10, 450, 420, 38), 19,
+                 instruction, false, StringAlignmentCenter);
         }
         g.Flush(FlushIntentionSync);
         return &card_;
