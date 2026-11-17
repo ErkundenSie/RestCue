@@ -69,6 +69,7 @@ public static class RestCueSmoke {
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc callback, IntPtr param);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hwnd, StringBuilder text, int size);
     [DllImport("user32.dll")] public static extern bool GetLayeredWindowAttributes(IntPtr hwnd, out uint color, out byte alpha, out uint flags);
+    [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hwnd, int index);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] public static extern uint GetPrivateProfileInt(string section, string key, int fallback, string path);
     public static IntPtr MainWindow() { return FindWindow("RestCue.MainWindow", null); }
     [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hwnd, uint command);
@@ -91,10 +92,14 @@ public static class RestCueSmoke {
             Rect pane, shade;
             var owner = GetWindow(card, 4);
             if (owner == IntPtr.Zero || !GetWindowRect(card, out pane) || !GetWindowRect(owner, out shade)) return false;
-            if (Math.Abs(pane.Left + pane.Right - shade.Left - shade.Right) > 2 ||
-                Math.Abs(pane.Top + pane.Bottom - shade.Top - shade.Bottom) > 2 ||
-                pane.Right - pane.Left >= shade.Right - shade.Left ||
-                pane.Bottom - pane.Top >= shade.Bottom - shade.Top) return false;
+            var paneW = pane.Right - pane.Left;
+            var paneH = pane.Bottom - pane.Top;
+            var shadeW = shade.Right - shade.Left;
+            var shadeH = shade.Bottom - shade.Top;
+            if (Math.Abs(pane.Left + pane.Right - shade.Left - shade.Right) > 4) return false;
+            // The circle is square at the top; the instruction extends beneath it.
+            if (Math.Abs(pane.Top * 2 + paneW - shade.Top - shade.Bottom) > 4) return false;
+            if (paneW >= shadeW || paneH >= shadeH || Math.Abs(paneH * 440.0 / 500 - paneW) > 4) return false;
         }
         return true;
     }
@@ -230,7 +235,7 @@ try {
     Check ((Overlay-Count) -eq $monitors) 'manual break covers every monitor'
     Check ((Card-Count) -eq $monitors) 'every monitor has a separate rest card'
     Check (-not [RestCueSmoke]::IsWindowVisible($main)) 'preview temporarily collects settings into the tray'
-    Check ([RestCueSmoke]::CardsCentered()) 'rest cards are compact and centered on their monitors'
+    Check ([RestCueSmoke]::CardsCentered()) 'rest clock is compact and centered on each monitor'
     Start-Sleep -Milliseconds 650
     $windows = @([RestCueSmoke]::Overlays())
     [uint32]$color = 0; [byte]$alpha = 0; [uint32]$flags = 0
@@ -240,7 +245,7 @@ try {
     $card = @([RestCueSmoke]::RestCards())[0]
     [byte]$cardAlpha = 0
     $cardAttributes = [RestCueSmoke]::GetLayeredWindowAttributes($card, [ref]$color, [ref]$cardAlpha, [ref]$flags)
-    Check ($cardAttributes -and $cardAlpha -eq 255) 'rest card remains fully readable independently of shade opacity'
+    Check (-not $cardAttributes -and (([RestCueSmoke]::GetWindowLong($card, -20) -band 0x80000) -ne 0)) 'rest cue uses per-pixel alpha rather than an opaque card'
     [void][RestCueSmoke]::SendMessage($card, 0x100, [IntPtr]27, [IntPtr]::Zero)
     [void][RestCueSmoke]::SendMessage($card, 0x202, [IntPtr]::Zero, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 100

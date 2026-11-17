@@ -61,14 +61,14 @@ public:
         info.bmiHeader.biPlanes = 1;
         info.bmiHeader.biBitCount = 32;
         info.bmiHeader.biCompression = BI_RGB;
-        void* bits = nullptr;
-        bitmap_ = CreateDIBSection(reference, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+        bitmap_ = CreateDIBSection(reference, &info, DIB_RGB_COLORS, &bits_, nullptr, 0);
         if (!dc_ || !bitmap_) { clear(); return false; }
         old_ = SelectObject(dc_, bitmap_);
         width_ = width; height_ = height;
         return true;
     }
     HDC dc() const { return dc_; }
+    BYTE* bits() const { return static_cast<BYTE*>(bits_); }
     int width() const { return width_; }
     int height() const { return height_; }
 private:
@@ -76,11 +76,12 @@ private:
         if (dc_ && old_) SelectObject(dc_, old_);
         if (bitmap_) DeleteObject(bitmap_);
         if (dc_) DeleteDC(dc_);
-        dc_ = nullptr; bitmap_ = nullptr; old_ = nullptr; width_ = height_ = 0;
+        dc_ = nullptr; bitmap_ = nullptr; old_ = nullptr; bits_ = nullptr; width_ = height_ = 0;
     }
     HDC dc_ = nullptr;
     HBITMAP bitmap_ = nullptr;
     HGDIOBJ old_ = nullptr;
+    void* bits_ = nullptr;
     int width_ = 0, height_ = 0;
 };
 
@@ -306,15 +307,20 @@ inline void slider(HDC dc, int width, int height, unsigned opacity, bool focused
     }
 }
 
-constexpr float RestCardSize = 320;
+constexpr float RestCueWidth = 440, RestCueHeight = 500;
+constexpr float RestRingCenter = 220;
 
 inline RECT restCardBounds(const RECT& monitor, UINT dpi) {
-    const int width = monitor.right - monitor.left, height = monitor.bottom - monitor.top;
-    const float fit = std::max(0.1f, (std::min(width, height) - 32.0f) / RestCardSize);
-    const float scale = std::min(dpi / 96.0f, fit);
-    const int size = std::max(1, static_cast<int>(std::lround(RestCardSize * scale)));
-    const int x = monitor.left + (width - size) / 2, y = monitor.top + (height - size) / 2;
-    return {x, y, x + size, y + size};
+    const int screenW = monitor.right - monitor.left, screenH = monitor.bottom - monitor.top;
+    const float scale = std::max(0.01f, std::min({dpi / 96.0f,
+        (screenW - 48.0f) / RestCueWidth,
+        (screenH - 64.0f) / (2 * (RestCueHeight - RestRingCenter))}));
+    const int width = std::max(1, static_cast<int>(std::lround(RestCueWidth * scale)));
+    const int height = std::max(1, static_cast<int>(std::lround(RestCueHeight * scale)));
+    const int x = monitor.left + (screenW - width) / 2;
+    // Center the ring itself, not the ring plus the instruction underneath it.
+    const int y = monitor.top + screenH / 2 - width / 2;
+    return {x, y, x + width, y + height};
 }
 
 class OverlayScene {
@@ -326,38 +332,56 @@ public:
             Graphics g(shade_.dc());
             setup(g);
             LinearGradientBrush veil(PointF(0, 0), PointF(static_cast<float>(width), static_cast<float>(height)),
-                Color(255, 25, 42, 35), Color(255, 40, 53, 45));
+                Color(255, 24, 32, 48), Color(255, 37, 45, 61));
             g.FillRectangle(&veil, 0, 0, width, height);
         }
         BitBlt(target, 0, 0, width, height, shade_.dc(), 0, 0, SRCCOPY);
     }
 
-    void paintCard(HDC target, int width, int height, const std::wstring& countdown, float progress,
-                   const wchar_t* hint = L"右键单击退出本次休息") {
-        if (!card_.resize(target, width, height)) return;
-        {
-            Graphics g(card_.dc());
-            setup(g);
-            g.Clear(opaque(CardBackground));
-            const float scale = std::min(width, height) / RestCardSize;
-            g.ScaleTransform(scale, scale);
-            box(g, RectF(.7f, .7f, RestCardSize - 1.4f, RestCardSize - 1.4f), 24,
-                opaque(CardBackground), Color(255, 247, 249, 243), Color(255, 204, 219, 205), 1.2f);
-            const float cx = 160, cy = 156, radius = 110;
-            SolidBrush center(Color(255, 250, 252, 246));
-            g.FillEllipse(&center, cx - radius, cy - radius, 2 * radius, 2 * radius);
-            Pen track(Color(255, 222, 232, 219), 3.4f);
-            g.DrawEllipse(&track, cx - radius, cy - radius, 2 * radius, 2 * radius);
-            Pen arc(Color(255, 91, 143, 116), 3.4f);
-            arc.SetStartCap(LineCapRound); arc.SetEndCap(LineCapRound);
-            g.DrawArc(&arc, cx - radius, cy - radius, 2 * radius, 2 * radius,
-                      -90.0f, std::clamp(progress, 0.0f, 1.0f) * 359.9f);
-            text(g, countdown, RectF(cx - 120, cy - 53, 240, 78), 49,
-                Color(255, 42, 95, 78), true, StringAlignmentCenter, L"Segoe UI");
-            text(g, hint, RectF(cx - 134, cy + 39, 268, 26), 13.5f,
-                opaque(MutedForeground), false, StringAlignmentCenter);
+    const Surface* renderCard(HDC reference, int width, int height, const std::wstring& countdown,
+                              float progress, bool forced = false) {
+        if (!card_.resize(reference, width, height)) return nullptr;
+        // Draw directly into premultiplied pixels. ClearType/DC painting cannot preserve
+        // alpha, and would leave a solid disc or black fringes on a layered window.
+        Bitmap pixels(width, height, width * 4, PixelFormat32bppPARGB, card_.bits());
+        Graphics g(&pixels);
+        setup(g);
+        g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+        g.Clear(Color(0, 0, 0, 0));
+        const float scale = std::min(width / RestCueWidth, height / RestCueHeight);
+        g.ScaleTransform(scale, scale);
+        constexpr float center = RestRingCenter, radius = 196, stroke = 20;
+        Pen track(Color(70, 255, 255, 255), stroke);
+        g.DrawEllipse(&track, center - radius, center - radius, radius * 2, radius * 2);
+        LinearGradientBrush green(PointF(center, center - radius), PointF(center, center + radius),
+                                  Color(255, 153, 255, 79), Color(255, 20, 230, 88));
+        Pen arc(&green, stroke);
+        arc.SetStartCap(LineCapRound); arc.SetEndCap(LineCapRound);
+        const float sweep = std::clamp(progress, 0.0f, 1.0f) * 360.0f;
+        if (sweep >= 359.9f)
+            g.DrawEllipse(&arc, center - radius, center - radius, radius * 2, radius * 2);
+        else if (sweep > 0)
+            g.DrawArc(&arc, center - radius, center - radius, radius * 2, radius * 2, -90.0f, sweep);
+        text(g, countdown, RectF(18, 145, 404, 100), 84, Color(255, 255, 255, 255),
+             true, StringAlignmentCenter, L"Segoe UI");
+        text(g, L"休息中 · 即将恢复", RectF(30, 264, 380, 38), 24,
+             Color(245, 255, 255, 255), false, StringAlignmentCenter);
+        const Color white(245, 255, 255, 255);
+        if (!forced) {
+            // Small mouse outline, aligned with the instruction rather than a button.
+            GraphicsPath mouse;
+            rounded(mouse, RectF(67, 454, 24, 34), 12);
+            Pen outline(white, 1.8f);
+            g.DrawPath(&outline, &mouse);
+            g.DrawLine(&outline, 67.0f, 468.0f, 91.0f, 468.0f);
+            g.DrawLine(&outline, 79.0f, 454.0f, 79.0f, 468.0f);
+            text(g, L"右键单击退出本次休息", RectF(104, 450, 310, 42), 22, white);
+        } else {
+            text(g, L"强制休息 · 请完成本次休息", RectF(10, 450, 420, 42), 22,
+                 white, false, StringAlignmentCenter);
         }
-        BitBlt(target, 0, 0, width, height, card_.dc(), 0, 0, SRCCOPY);
+        g.Flush(FlushIntentionSync);
+        return &card_;
     }
 
 private:

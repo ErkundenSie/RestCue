@@ -53,6 +53,7 @@ struct Control { HWND hwnd; int x, y, width, height; bool heading; };
 struct RestWindow {
     explicit RestWindow(bool isCard) : card(isCard) {}
     bool card;
+    BYTE alpha = 0;
     restcue::theme::OverlayScene scene;
 };
 HINSTANCE instance = nullptr;
@@ -73,6 +74,7 @@ std::uint64_t lastOverlayFrame = 0;
 
 void refresh();
 void command(int id);
+void updateRestCue(HWND hwnd, BYTE alpha);
 LRESULT CALLBACK overlayProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK sliderProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK buttonProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
@@ -532,14 +534,6 @@ void hideOverlays() {
     previousForeground = nullptr;
 }
 
-void roundRestCard(HWND hwnd) {
-    RECT rect{};
-    GetClientRect(hwnd, &rect);
-    const int diameter = std::max(1, MulDiv(std::min(rect.right, rect.bottom), 48, 320));
-    HRGN region = CreateRoundRectRgn(0, 0, rect.right + 1, rect.bottom + 1, diameter, diameter);
-    if (region && !SetWindowRgn(hwnd, region, TRUE)) DeleteObject(region);
-}
-
 BOOL CALLBACK createMonitorOverlay(HMONITOR, HDC, LPRECT rect, LPARAM) {
     HWND shade = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         OverlayClass, L"RestCue 休息遮罩", WS_POPUP,
@@ -556,8 +550,8 @@ BOOL CALLBACK createMonitorOverlay(HMONITOR, HDC, LPRECT rect, LPARAM) {
         bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top,
         shade, nullptr, instance, reinterpret_cast<LPVOID>(1));
     if (card) {
-        SetLayeredWindowAttributes(card, 0, 0, LWA_ALPHA);
-        roundRestCard(card);
+        // Per-pixel alpha: only the ring and text are visible, with no card background.
+        updateRestCue(card, 0);
         restCards.push_back(card);
         ShowWindow(card, SW_SHOWNOACTIVATE);
     }
@@ -592,8 +586,9 @@ void refresh() {
         const auto cardAlpha = restcue::fadeAlpha(now >= overlayStarted ? now - overlayStarted : 0,
                                                   remaining, timer.restDuration(), 100);
         for (HWND hwnd : restCards) {
-            SetLayeredWindowAttributes(hwnd, 0, static_cast<BYTE>(cardAlpha), LWA_ALPHA);
-            if (frame != lastOverlayFrame) InvalidateRect(hwnd, nullptr, FALSE);
+            const auto* state = reinterpret_cast<RestWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+            if (frame != lastOverlayFrame || (state && state->alpha != cardAlpha))
+                updateRestCue(hwnd, static_cast<BYTE>(cardAlpha));
         }
         lastOverlayFrame = frame;
     } else if (!overlays.empty() || !restCards.empty()) {
@@ -886,6 +881,27 @@ LRESULT CALLBACK sliderProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
+void updateRestCue(HWND hwnd, BYTE alpha) {
+    auto* state = reinterpret_cast<RestWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!state || !state->card) return;
+    RECT rect{};
+    GetWindowRect(hwnd, &rect);
+    const int width = rect.right - rect.left, height = rect.bottom - rect.top;
+    HDC screen = GetDC(nullptr);
+    const auto remaining = timer.remaining(GetTickCount64());
+    const auto* surface = state->scene.renderCard(screen, width, height, clockText(remaining),
+        static_cast<float>(remaining) / static_cast<float>(std::max<std::uint64_t>(1, timer.restDuration())),
+        boxChecked(ForceRest));
+    if (surface) {
+        POINT destination{rect.left, rect.top}, source{0, 0};
+        SIZE size{width, height};
+        BLENDFUNCTION blend{AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA};
+        if (UpdateLayeredWindow(hwnd, screen, &destination, &size, surface->dc(), &source, 0, &blend, ULW_ALPHA))
+            state->alpha = alpha;
+    }
+    if (screen) ReleaseDC(nullptr, screen);
+}
+
 void drawRestSurface(HWND hwnd, HDC dc) {
     RECT client{};
     GetClientRect(hwnd, &client);
@@ -893,9 +909,10 @@ void drawRestSurface(HWND hwnd, HDC dc) {
     if (!state) return;
     if (state->card) {
         const auto remaining = timer.remaining(GetTickCount64());
-        state->scene.paintCard(dc, client.right, client.bottom, clockText(remaining),
-            static_cast<float>(remaining) / static_cast<float>(timer.restDuration()),
-            boxChecked(ForceRest) ? L"请完成本次休息" : L"右键单击退出本次休息");
+        const auto* surface = state->scene.renderCard(dc, client.right, client.bottom, clockText(remaining),
+            static_cast<float>(remaining) / static_cast<float>(std::max<std::uint64_t>(1, timer.restDuration())),
+            boxChecked(ForceRest));
+        if (surface) BitBlt(dc, 0, 0, client.right, client.bottom, surface->dc(), 0, 0, SRCCOPY);
     } else {
         state->scene.paintShade(dc, client.right, client.bottom);
     }
@@ -904,7 +921,9 @@ void drawRestSurface(HWND hwnd, HDC dc) {
 void drawOverlay(HWND hwnd) {
     PAINTSTRUCT ps{};
     HDC dc = BeginPaint(hwnd, &ps);
-    drawRestSurface(hwnd, dc);
+    auto* state = reinterpret_cast<RestWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (state && state->card) updateRestCue(hwnd, state->alpha);
+    else drawRestSurface(hwnd, dc);
     EndPaint(hwnd, &ps);
 }
 
@@ -937,7 +956,7 @@ LRESULT CALLBACK overlayProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
         SetWindowPos(hwnd, HWND_TOPMOST, rect->left, rect->top, rect->right - rect->left,
                      rect->bottom - rect->top, SWP_NOACTIVATE);
         const auto* state = reinterpret_cast<RestWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-        if (state && state->card) roundRestCard(hwnd);
+        if (state && state->card) updateRestCue(hwnd, state->alpha);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }

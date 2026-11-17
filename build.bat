@@ -21,6 +21,8 @@ cl /nologo /std:c++17 /EHsc /W4 /utf-8 /MT tests\timer_tests.cpp /Fobuild\timer_
 if errorlevel 1 exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /utf-8 /MT tests\settings_tests.cpp /Fobuild\settings_tests.obj /Febuild\settings_tests.exe /link shell32.lib ole32.lib
 if errorlevel 1 exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /utf-8 /MT tests\overlay_tests.cpp /Fobuild\overlay_tests.obj /Febuild\overlay_tests.exe /link gdiplus.lib gdi32.lib user32.lib
+if errorlevel 1 exit /b 1
 goto test
 
 :mingw
@@ -31,6 +33,8 @@ if errorlevel 1 exit /b 1
 g++ -std=c++17 -O2 -Wall -Wextra -static tests\timer_tests.cpp -o build\timer_tests.exe
 if errorlevel 1 exit /b 1
 g++ -std=c++17 -O2 -Wall -Wextra -static tests\settings_tests.cpp -o build\settings_tests.exe -lshell32 -lole32
+if errorlevel 1 exit /b 1
+g++ -std=c++17 -O2 -Wall -Wextra -static tests\overlay_tests.cpp -o build\overlay_tests.exe -lgdiplus -lgdi32 -luser32
 if errorlevel 1 exit /b 1
 goto test
 
@@ -43,11 +47,15 @@ zig c++ -std=c++17 -O2 -Wall -Wextra -target x86_64-windows-gnu -static tests\ti
 if errorlevel 1 exit /b 1
 zig c++ -std=c++17 -O2 -Wall -Wextra -target x86_64-windows-gnu -static tests\settings_tests.cpp -o build\settings_tests.exe -lshell32 -lole32
 if errorlevel 1 exit /b 1
+zig c++ -std=c++17 -O2 -Wall -Wextra -target x86_64-windows-gnu -static tests\overlay_tests.cpp -o build\overlay_tests.exe -lgdiplus -lgdi32 -luser32
+if errorlevel 1 exit /b 1
 
 :test
 build\timer_tests.exe
 if errorlevel 1 exit /b 1
 build\settings_tests.exe
+if errorlevel 1 exit /b 1
+build\overlay_tests.exe
 if errorlevel 1 exit /b 1
 copy /y build\RestCue.exe RestCue.exe >nul
 if errorlevel 1 exit /b 1

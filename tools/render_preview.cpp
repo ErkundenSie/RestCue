@@ -68,18 +68,15 @@ int main() {
     scene.paintShade(overlay.dc(), 1280, 800);
     const RECT monitor{0, 0, 1280, 800};
     const auto bounds = restCardBounds(monitor, 120);
-    Surface restCard;
-    restCard.resize(overlay.dc(), bounds.right - bounds.left, bounds.bottom - bounds.top);
-    scene.paintCard(restCard.dc(), restCard.width(), restCard.height(), L"04:49", .9633f);
-    GraphicsPath cardShape;
-    rounded(cardShape, Gdiplus::RectF(static_cast<float>(bounds.left), static_cast<float>(bounds.top),
-            static_cast<float>(restCard.width()), static_cast<float>(restCard.height())), restCard.width() * 24.0f / RestCardSize);
-    Gdiplus::Bitmap cardImage(static_cast<HBITMAP>(GetCurrentObject(restCard.dc(), OBJ_BITMAP)), nullptr);
+    const auto* restCard = scene.renderCard(overlay.dc(), bounds.right - bounds.left,
+        bounds.bottom - bounds.top, L"04:49", .72f);
+    if (!restCard) return 3;
+    Gdiplus::Bitmap cardImage(restCard->width(), restCard->height(), restCard->width() * 4,
+                              PixelFormat32bppPARGB, restCard->bits());
     {
         Gdiplus::Graphics composite(overlay.dc());
         setup(composite);
-        composite.SetClip(&cardShape);
-        composite.DrawImage(&cardImage, bounds.left, bounds.top, restCard.width(), restCard.height());
+        composite.DrawImage(&cardImage, bounds.left, bounds.top, restCard->width(), restCard->height());
     }
     const bool a = save(main, L"build/main-preview.png");
     const bool b = save(overlay, L"build/overlay-preview.png");
