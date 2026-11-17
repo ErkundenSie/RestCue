@@ -15,7 +15,7 @@ exit /b 1
 :msvc
 rc /nologo /fobuild\restcue.res restcue.rc
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++17 /EHsc /O2 /W4 /utf-8 /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0A00 main.cpp build\restcue.res /Fobuild\main.obj /Febuild\RestCue.exe /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib shell32.lib ole32.lib gdiplus.lib comctl32.lib dwmapi.lib
+cl /nologo /std:c++17 /EHsc /O2 /W4 /utf-8 /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0A00 main.cpp build\restcue.res /Fobuild\main.obj /Febuild\RestCue.exe /link /MANIFEST:NO /SUBSYSTEM:WINDOWS user32.lib gdi32.lib shell32.lib ole32.lib gdiplus.lib comctl32.lib dwmapi.lib
 if errorlevel 1 exit /b 1
 cl /nologo /std:c++17 /EHsc /W4 /utf-8 /MT tests\timer_tests.cpp /Fobuild\timer_tests.obj /Febuild\timer_tests.exe
 if errorlevel 1 exit /b 1

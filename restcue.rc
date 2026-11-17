@@ -1,6 +1,7 @@
 #include "resource.h"
 
 IDI_RESTCUE ICON "assets/restcue.ico"
+1 24 "restcue.manifest"
 
 1 VERSIONINFO
 FILEVERSION 2,7,0,0

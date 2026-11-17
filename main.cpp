@@ -37,6 +37,8 @@ constexpr int WorkEdit = 101, RestMinEdit = 102, RestSecEdit = 103, OpacityEdit 
 constexpr int IncreaseWork = 211, DecreaseWork = 212;
 constexpr int Apply = 201, Toggle = 202, RestNow = 203, Skip = 204;
 constexpr int Status = 301, Open = 302, Exit = 303, Stop = 304;
+constexpr DWORD MainStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+constexpr DWORD MainExStyle = WS_EX_CONTROLPARENT;
 
 using Settings = restcue::Settings;
 Settings settings;
@@ -73,15 +75,35 @@ LRESULT CALLBACK buttonProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 UINT dpiFor(HWND hwnd) {
     using GetDpi = UINT(WINAPI*)(HWND);
     static auto getDpi = reinterpret_cast<GetDpi>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow"));
-    if (getDpi) return getDpi(hwnd);
+    if (getDpi && hwnd) {
+        const UINT dpi = getDpi(hwnd);
+        if (dpi) return dpi;
+    }
     HDC dc = GetDC(hwnd);
     const UINT dpi = dc ? static_cast<UINT>(GetDeviceCaps(dc, LOGPIXELSY)) : 96;
     if (dc) ReleaseDC(hwnd, dc);
-    return dpi;
+    return dpi ? dpi : 96;
 }
 
 int scaled(int value, UINT dpi) {
     return MulDiv(value, static_cast<int>(dpi) * restcue::theme::SettingsScalePercent, 9600);
+}
+
+void adjustWindowForDpi(RECT& rect, UINT dpi) {
+    using Adjust = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+    static auto adjust = reinterpret_cast<Adjust>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi"));
+    if (!adjust || !adjust(&rect, MainStyle, FALSE, MainExStyle, dpi))
+        AdjustWindowRectEx(&rect, MainStyle, FALSE, MainExStyle);
+}
+
+int contentSpan(HWND hwnd) {
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    return std::max(1, static_cast<int>(client.right));
+}
+
+int place(int value, int span) {
+    return MulDiv(value, span, static_cast<int>(restcue::theme::MainWidth));
 }
 
 HICON loadAppIcon(int width, int height) {
@@ -90,24 +112,89 @@ HICON loadAppIcon(int width, int height) {
     return icon ? icon : LoadIconW(nullptr, IDI_APPLICATION);
 }
 
-HFONT makeFont(int points, UINT dpi, int weight = FW_NORMAL) {
-    return CreateFontW(-MulDiv(points, static_cast<int>(dpi) * restcue::theme::SettingsScalePercent, 7200), 0, 0, 0, weight,
+HFONT makeFont(int points, int span, int weight = FW_NORMAL) {
+    const int design = static_cast<int>(restcue::theme::MainWidth);
+    return CreateFontW(-MulDiv(points, span * 96, design * 72), 0, 0, 0, weight,
                        FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                        CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei UI");
 }
 
 void layoutControls() {
-    const UINT dpi = dpiFor(mainWindow);
+    const int span = contentSpan(mainWindow);
     HFONT oldUi = uiFont, oldHeading = headingFont;
-    uiFont = makeFont(16, dpi);
-    headingFont = makeFont(18, dpi, FW_SEMIBOLD);
+    uiFont = makeFont(16, span);
+    headingFont = makeFont(18, span, FW_SEMIBOLD);
     for (const auto& c : controls) {
-        MoveWindow(c.hwnd, scaled(c.x, dpi), scaled(c.y, dpi),
-                   scaled(c.width, dpi), scaled(c.height, dpi), TRUE);
+        MoveWindow(c.hwnd, place(c.x, span), place(c.y, span),
+                   place(c.width, span), place(c.height, span), TRUE);
         SendMessageW(c.hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(c.heading ? headingFont : uiFont), TRUE);
+        InvalidateRect(c.hwnd, nullptr, FALSE);
     }
     if (oldUi) DeleteObject(oldUi);
     if (oldHeading) DeleteObject(oldHeading);
+}
+
+bool fittingWindow = false;
+
+// Keep the client exactly scaled(MainWidth/MainHeight, dpi). Windows' suggested
+// WM_DPICHANGED size scales the outer frame linearly, so the client drifts and the
+// painted panel no longer lines up with the child controls.
+void fitMainWindow(HWND hwnd, UINT dpi, const RECT* suggested) {
+    if (!hwnd || !dpi || fittingWindow) return;
+    fittingWindow = true;
+    UINT target = dpi;
+    bool move = suggested != nullptr;
+    const int x = suggested ? suggested->left : 0;
+    const int y = suggested ? suggested->top : 0;
+    bool changed = move;
+    for (int pass = 0; pass < 2; ++pass) {
+        const int wantW = scaled(static_cast<int>(restcue::theme::MainWidth), target);
+        const int wantH = scaled(static_cast<int>(restcue::theme::MainHeight), target);
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        if (move) {
+            RECT rect{0, 0, wantW, wantH};
+            adjustWindowForDpi(rect, target);
+            SetWindowPos(hwnd, nullptr, x, y, rect.right - rect.left, rect.bottom - rect.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            move = false;
+            GetClientRect(hwnd, &client);
+        }
+        if (client.right != wantW || client.bottom != wantH) {
+            RECT wr{};
+            GetWindowRect(hwnd, &wr);
+            SetWindowPos(hwnd, nullptr, 0, 0,
+                         (wr.right - wr.left) + (wantW - client.right),
+                         (wr.bottom - wr.top) + (wantH - client.bottom),
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            changed = true;
+        }
+        const UINT actual = dpiFor(hwnd);
+        if (!actual || actual == target) break;
+        target = actual;
+    }
+    if (changed) layoutControls();
+    fittingWindow = false;
+    if (changed)
+        RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME | RDW_UPDATENOW);
+}
+
+LRESULT CALLBACK childDpiProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR id, DWORD_PTR) {
+    // Per-monitor v2 asks DefWindowProc to rescale child windows after the parent has
+    // already placed them. Swallow that so a monitor change cannot shift the controls
+    // off the painted cards.
+    if (message == WM_DPICHANGED || message == WM_DPICHANGED_BEFOREPARENT) return 0;
+    if (message == WM_GETDPISCALEDSIZE) {
+        RECT rect{};
+        GetWindowRect(hwnd, &rect);
+        if (auto* size = reinterpret_cast<SIZE*>(lParam)) {
+            size->cx = rect.right - rect.left;
+            size->cy = rect.bottom - rect.top;
+        }
+        return TRUE;
+    }
+    if (message == WM_NCDESTROY) RemoveWindowSubclass(hwnd, childDpiProc, id);
+    return DefSubclassProc(hwnd, message, wParam, lParam);
 }
 
 HWND addControl(const wchar_t* cls, const wchar_t* text, int id,
@@ -116,6 +203,7 @@ HWND addControl(const wchar_t* cls, const wchar_t* text, int id,
         cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, mainWindow,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, nullptr);
     controls.push_back({hwnd, x, y, w, h, heading});
+    SetWindowSubclass(hwnd, childDpiProc, 2, 0);
     if (wcscmp(cls, L"BUTTON") == 0) SetWindowSubclass(hwnd, buttonProc, 1, 0);
     return hwnd;
 }
@@ -228,6 +316,7 @@ std::wstring clockText(std::uint64_t milliseconds) {
 
 void showMain() {
     ShowWindow(mainWindow, SW_RESTORE);
+    fitMainWindow(mainWindow, dpiFor(mainWindow), nullptr);
     SetForegroundWindow(mainWindow);
 }
 
@@ -327,7 +416,8 @@ void refresh() {
     if (text != lastStatus) {
         SetDlgItemTextW(mainWindow, Status, text.c_str());
         lastStatus = text;
-        RECT badge{scaled(555, dpiFor(mainWindow)), scaled(25, dpiFor(mainWindow)), scaled(785, dpiFor(mainWindow)), scaled(135, dpiFor(mainWindow))};
+        const int span = contentSpan(mainWindow);
+        RECT badge{place(555, span), place(25, span), place(785, span), place(135, span)};
         InvalidateRect(mainWindow, &badge, FALSE);
         if (trayVisible) {
             StringCchCopyW(tray.szTip, ARRAYSIZE(tray.szTip), (L"RestCue · " + text).c_str());
@@ -413,7 +503,11 @@ void drawMain(HDC dc) {
     }
     {
         Gdiplus::Graphics graphics(buffer.dc());
-        restcue::theme::mainPanel(graphics, dpiFor(mainWindow) / 96.0f * restcue::theme::SettingsScale, phase,
+        graphics.Clear(restcue::theme::opaque(restcue::theme::Background));
+        const float scale = client.right > 0
+            ? static_cast<float>(client.right) / restcue::theme::MainWidth
+            : restcue::theme::SettingsScale;
+        restcue::theme::mainPanel(graphics, scale, phase,
             clockText(timer.remaining(GetTickCount64())),
             timer.phase() == restcue::Phase::Working || timer.phase() == restcue::Phase::Resting,
             GetDlgCtrlID(GetFocus()));
@@ -619,11 +713,21 @@ LRESULT CALLBACK mainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         if (wParam == SIZE_MINIMIZED) restoreSettingsAfterRest = false;
         if (wParam == SIZE_MINIMIZED && trayVisible) ShowWindow(hwnd, SW_HIDE);
         return 0;
+    case WM_GETDPISCALEDSIZE: {
+        const UINT dpi = static_cast<UINT>(wParam);
+        auto* size = reinterpret_cast<SIZE*>(lParam);
+        if (!dpi || !size) break;
+        RECT rect{0, 0, scaled(static_cast<int>(restcue::theme::MainWidth), dpi),
+                        scaled(static_cast<int>(restcue::theme::MainHeight), dpi)};
+        adjustWindowForDpi(rect, dpi);
+        size->cx = rect.right - rect.left;
+        size->cy = rect.bottom - rect.top;
+        return TRUE;
+    }
     case WM_DPICHANGED: {
-        const RECT* rect = reinterpret_cast<RECT*>(lParam);
-        SetWindowPos(hwnd, nullptr, rect->left, rect->top, rect->right - rect->left,
-                     rect->bottom - rect->top, SWP_NOZORDER | SWP_NOACTIVATE);
-        layoutControls();
+        const auto* suggested = reinterpret_cast<const RECT*>(lParam);
+        const UINT dpi = LOWORD(wParam);
+        if (suggested && dpi) fitMainWindow(hwnd, dpi, suggested);
         return 0;
     }
     case WM_DISPLAYCHANGE:
@@ -715,14 +819,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int showCommand) {
         return 1;
     }
 
-    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
     UINT dpi = 96;
     HDC screen = GetDC(nullptr);
     if (screen) { dpi = static_cast<UINT>(GetDeviceCaps(screen, LOGPIXELSY)); ReleaseDC(nullptr, screen); }
+    if (!dpi) dpi = 96;
     RECT rect{0, 0, scaled(static_cast<int>(restcue::theme::MainWidth), dpi),
                     scaled(static_cast<int>(restcue::theme::MainHeight), dpi)};
-    AdjustWindowRectEx(&rect, style, FALSE, WS_EX_CONTROLPARENT);
-    HWND hwnd = CreateWindowExW(WS_EX_CONTROLPARENT, MainClass, Title, style,
+    adjustWindowForDpi(rect, dpi);
+    HWND hwnd = CreateWindowExW(MainExStyle, MainClass, Title, MainStyle,
         CW_USEDEFAULT, CW_USEDEFAULT, rect.right - rect.left, rect.bottom - rect.top,
         nullptr, nullptr, instance, nullptr);
     if (!hwnd) {
@@ -732,6 +836,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int showCommand) {
     }
     ShowWindow(hwnd, showCommand);
     UpdateWindow(hwnd);
+    fitMainWindow(hwnd, dpiFor(hwnd), nullptr);
     MSG message{};
     BOOL result;
     while ((result = GetMessageW(&message, nullptr, 0, 0)) > 0) {

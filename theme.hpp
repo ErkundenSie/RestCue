@@ -85,8 +85,9 @@ private:
 
 inline void setup(Graphics& g) {
     g.SetSmoothingMode(SmoothingModeAntiAlias);
-    g.SetPixelOffsetMode(PixelOffsetModeHighQuality);
-    g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+    g.SetPixelOffsetMode(PixelOffsetModeHalf);
+    g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
+    g.SetCompositingQuality(CompositingQualityHighQuality);
 }
 
 inline void rounded(GraphicsPath& path, RectF r, float radius) {
@@ -122,15 +123,35 @@ inline void glow(Graphics& g, RectF area, Color color) {
 inline void text(Graphics& g, const std::wstring& value, RectF area, float size,
                  Color color, bool bold = false, StringAlignment align = StringAlignmentNear,
                  const wchar_t* familyName = L"Microsoft YaHei UI") {
+    // A world scale (the compact 78% layout, or a DPI change) would rasterize glyphs and
+    // then stretch them. Draw text in device pixels at a whole-pixel size instead.
+    Matrix transform;
+    g.GetTransform(&transform);
+    REAL m[6]{};
+    transform.GetElements(m);
+    const float sx = m[0];
+    PointF corners[2] = {PointF(area.X, area.Y), PointF(area.GetRight(), area.GetBottom())};
+    transform.TransformPoints(corners, 2);
+    const bool scaled = std::fabs(sx - 1.0f) > 0.001f || std::fabs(m[1]) > 0.001f || std::fabs(m[2]) > 0.001f;
+    if (scaled) g.ResetTransform();
+    const float deviceSize = std::max(1.0f, std::round(size * std::fabs(sx)));
     FontFamily family(familyName);
-    Font font(&family, size, bold ? FontStyleBold : FontStyleRegular, UnitPixel);
+    Font font(&family, scaled ? deviceSize : size, bold ? FontStyleBold : FontStyleRegular, UnitPixel);
     SolidBrush brush(color);
     StringFormat format;
     format.SetAlignment(align);
     format.SetLineAlignment(StringAlignmentCenter);
     format.SetFormatFlags(StringFormatFlagsNoWrap);
     format.SetTrimming(StringTrimmingEllipsisCharacter);
-    g.DrawString(value.c_str(), static_cast<INT>(value.size()), &font, area, &format, &brush);
+    RectF target = area;
+    if (scaled) {
+        target = RectF(std::min(corners[0].X, corners[1].X), std::min(corners[0].Y, corners[1].Y),
+                       std::fabs(corners[1].X - corners[0].X), std::fabs(corners[1].Y - corners[0].Y));
+        target.X = std::round(target.X);
+        target.Y = std::round(target.Y);
+    }
+    g.DrawString(value.c_str(), static_cast<INT>(value.size()), &font, target, &format, &brush);
+    if (scaled) g.SetTransform(&transform);
 }
 
 inline void mainPanel(Graphics& g, float scale, const std::wstring& phase,
