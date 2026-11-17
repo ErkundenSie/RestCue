@@ -17,7 +17,7 @@ constexpr COLORREF MutedForeground = RGB(96, 113, 103);
 constexpr COLORREF CardBackground = RGB(255, 254, 251);
 constexpr COLORREF Accent = RGB(53, 115, 99);
 inline Color opaque(COLORREF color) { return Color(255, GetRValue(color), GetGValue(color), GetBValue(color)); }
-constexpr float MainWidth = 800, MainHeight = 500;
+constexpr float MainWidth = 800, MainHeight = 532;
 // Compact the settings window only; rest overlays retain their own screen-relative layout.
 constexpr int SettingsScalePercent = 78;
 constexpr float SettingsScale = SettingsScalePercent / 100.0f;
@@ -27,8 +27,9 @@ struct Placement { int x, y, width, height; };
 inline constexpr Placement Work{241, 199, 52, 30}, WorkUp{298, 196, 18, 16}, WorkDown{298, 216, 18, 16};
 inline constexpr Placement RestMinutes{560, 199, 42, 30}, RestSeconds{662, 199, 42, 30};
 inline constexpr Placement OpacityTrack{290, 333, 326, 28}, OpacityValue{650, 333, 52, 30};
-inline constexpr Placement Apply{32, 420, 218, 48}, Pause{262, 420, 158, 48};
-inline constexpr Placement Rest{432, 420, 158, 48}, Skip{602, 420, 166, 48};
+inline constexpr Placement Startup{40, 410, 140, 32}, CloseMinimizes{190, 410, 230, 32}, ForceRest{430, 410, 150, 32};
+inline constexpr Placement Apply{32, 452, 218, 48}, Pause{262, 452, 158, 48};
+inline constexpr Placement Rest{432, 452, 158, 48}, Skip{602, 452, 166, 48};
 }
 
 class Runtime {
@@ -207,6 +208,31 @@ inline void mainPanel(Graphics& g, float scale, const std::wstring& phase,
     g.ResetTransform();
 }
 
+inline void checkBox(HDC dc, RectF bounds, const std::wstring& label, bool checked,
+                     bool pressed, bool hover, bool focus) {
+    Graphics g(dc);
+    setup(g);
+    g.Clear(opaque(Background));
+    const float boxSize = std::min(18.0f, std::max(12.0f, bounds.Height - 10));
+    const float y = (bounds.Height - boxSize) / 2 + (pressed ? 0.5f : 0);
+    RectF mark(1.5f, y, boxSize, boxSize);
+    const Color fill = checked ? opaque(Accent) : opaque(CardBackground);
+    const Color border = (focus || hover || checked) ? opaque(Accent) : Color(255, 176, 196, 184);
+    box(g, mark, 4, fill, fill, border, focus ? 1.6f : 1.2f);
+    if (checked) {
+        Pen pen(Color(255, 251, 254, 252), std::max(1.5f, boxSize * 0.12f));
+        pen.SetStartCap(LineCapRound); pen.SetEndCap(LineCapRound); pen.SetLineJoin(LineJoinRound);
+        const PointF points[] = {
+            PointF(mark.X + boxSize * 0.22f, mark.Y + boxSize * 0.52f),
+            PointF(mark.X + boxSize * 0.42f, mark.Y + boxSize * 0.74f),
+            PointF(mark.X + boxSize * 0.80f, mark.Y + boxSize * 0.28f)
+        };
+        g.DrawLines(&pen, points, 3);
+    }
+    text(g, label, RectF(boxSize + 10, 0, std::max(1.0f, bounds.Width - boxSize - 12), bounds.Height),
+         std::min(16.0f, bounds.Height * 0.52f), opaque(Foreground));
+}
+
 inline void stepper(HDC dc, RectF bounds, bool up, bool enabled,
                     bool pressed, bool hover, bool focus) {
     Graphics g(dc);
@@ -306,7 +332,8 @@ public:
         BitBlt(target, 0, 0, width, height, shade_.dc(), 0, 0, SRCCOPY);
     }
 
-    void paintCard(HDC target, int width, int height, const std::wstring& countdown, float progress) {
+    void paintCard(HDC target, int width, int height, const std::wstring& countdown, float progress,
+                   const wchar_t* hint = L"右键单击退出本次休息") {
         if (!card_.resize(target, width, height)) return;
         {
             Graphics g(card_.dc());
@@ -327,7 +354,7 @@ public:
                       -90.0f, std::clamp(progress, 0.0f, 1.0f) * 359.9f);
             text(g, countdown, RectF(cx - 120, cy - 53, 240, 78), 49,
                 Color(255, 42, 95, 78), true, StringAlignmentCenter, L"Segoe UI");
-            text(g, L"右键单击退出本次休息", RectF(cx - 134, cy + 39, 268, 26), 13.5f,
+            text(g, hint, RectF(cx - 134, cy + 39, 268, 26), 13.5f,
                 opaque(MutedForeground), false, StringAlignmentCenter);
         }
         BitBlt(target, 0, 0, width, height, card_.dc(), 0, 0, SRCCOPY);

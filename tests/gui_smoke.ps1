@@ -165,9 +165,9 @@ try {
     [void][RestCueSmoke]::GetClientRect($main, [ref]$client)
     $dpi = [RestCueSmoke]::GetDpiForWindow($main)
     Check ($client.Right -eq [Math]::Round(800 * 0.78 * $dpi / 96, [MidpointRounding]::AwayFromZero)) 'settings window uses compact width at current DPI'
-    Check ($client.Bottom -eq [Math]::Round(500 * 0.78 * $dpi / 96, [MidpointRounding]::AwayFromZero)) 'settings window uses compact height at current DPI'
+    Check ($client.Bottom -eq [Math]::Round(532 * 0.78 * $dpi / 96, [MidpointRounding]::AwayFromZero)) 'settings window uses compact height at current DPI'
     Check ([RestCueSmoke]::GetDlgItem($main, 205) -eq [IntPtr]::Zero) 'footer tray button is removed'
-    $controls = [int[]]@(101,102,103,104,105,201,202,203,204,211,212)
+    $controls = [int[]]@(101,102,103,104,105,201,202,203,204,206,207,208,211,212)
     Check ([RestCueSmoke]::ControlsFit($main, $controls)) 'all controls fit the compact window'
     Check ([RestCueSmoke]::NoOverlaps($main, $controls)) 'setting inputs and buttons do not overlap'
     Check ([RestCueSmoke]::SteppersBalanced($main)) 'minute arrows are inset and vertically balanced'
@@ -199,6 +199,7 @@ try {
     Check ([RestCueSmoke]::GetPrivateProfileInt('Timer', 'WorkMinutes', -1, $config) -eq 1) 'work interval is saved'
     Check ([RestCueSmoke]::GetPrivateProfileInt('Timer', 'RestSeconds', -1, $config) -eq 4) 'break duration is saved'
     Check ([RestCueSmoke]::GetPrivateProfileInt('Timer', 'Opacity', -1, $config) -eq 60) 'opacity is saved'
+    Check ([RestCueSmoke]::GetPrivateProfileInt('Timer', 'LaunchAtStartup', -1, $config) -eq 0) 'startup stays off unless enabled'
     # Repeated saves must not warn, and a new process must restore every field.
     Cmd 201
     Cmd 303

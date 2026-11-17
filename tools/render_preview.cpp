@@ -55,7 +55,7 @@ int main() {
     };
     arrow(layout::WorkUp, true);
     arrow(layout::WorkDown, false);
-    child(layout::Apply, L"保存并开始", true, true);
+    child(layout::Apply, L"保存", true, true);
     child(layout::Pause, L"暂停", false, true);
     child(layout::Rest, L"立即休息", false, true);
     child(layout::Skip, L"跳过休息", false, false);

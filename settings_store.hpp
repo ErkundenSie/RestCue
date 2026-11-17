@@ -14,6 +14,9 @@ struct Settings {
     unsigned workMinutes = 45;
     unsigned restSeconds = 300;
     unsigned opacity = 70;
+    bool launchAtStartup = false;
+    bool closeMinimizes = true;
+    bool forceRest = false;
 };
 
 struct SaveFailure { std::wstring path; DWORD error; };
@@ -84,7 +87,11 @@ public:
             const auto rest = GetPrivateProfileIntW(L"Timer", L"RestSeconds", 0, file.path.c_str());
             const auto opacity = GetPrivateProfileIntW(L"Timer", L"Opacity", 0, file.path.c_str());
             if (work >= 1 && work <= 1440 && rest >= 1 && rest <= 7200 && opacity >= 10 && opacity <= 95) {
-                return {work, rest, opacity};
+                const auto startup = GetPrivateProfileIntW(L"Timer", L"LaunchAtStartup", 0, file.path.c_str());
+                const auto closeMinimizes = GetPrivateProfileIntW(L"Timer", L"CloseMinimizes", 1, file.path.c_str());
+                const auto forceRest = GetPrivateProfileIntW(L"Timer", L"ForceRest", 0, file.path.c_str());
+                return {static_cast<unsigned>(work), static_cast<unsigned>(rest),
+                        static_cast<unsigned>(opacity), startup != 0, closeMinimizes != 0, forceRest != 0};
             }
         }
         return {};
@@ -116,7 +123,10 @@ private:
         }
         const std::string data = "[Timer]\r\nWorkMinutes=" + std::to_string(settings.workMinutes) +
             "\r\nRestSeconds=" + std::to_string(settings.restSeconds) +
-            "\r\nOpacity=" + std::to_string(settings.opacity) + "\r\n";
+            "\r\nOpacity=" + std::to_string(settings.opacity) +
+            "\r\nLaunchAtStartup=" + (settings.launchAtStartup ? "1" : "0") +
+            "\r\nCloseMinimizes=" + (settings.closeMinimizes ? "1" : "0") +
+            "\r\nForceRest=" + (settings.forceRest ? "1" : "0") + "\r\n";
         static std::atomic<unsigned long> sequence{0};
         std::wstring temporary;
         HANDLE output = INVALID_HANDLE_VALUE;

@@ -7,7 +7,11 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
+#include <winreg.h>
 #include <shellapi.h>
+#include <shlobj.h>
+#include <shobjidl.h>
+#include <objbase.h>
 #include <shlobj.h>
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -22,6 +26,7 @@
 #include <strsafe.h>
 
 #ifdef _MSC_VER
+#pragma comment(lib, "advapi32.lib")
 #pragma comment(linker, "\"/manifestdependency:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
 #endif
 
@@ -35,7 +40,7 @@ constexpr UINT TrayMessage = WM_APP + 1;
 constexpr UINT_PTR TickId = 1;
 constexpr int WorkEdit = 101, RestMinEdit = 102, RestSecEdit = 103, OpacityEdit = 104, OpacitySlider = 105;
 constexpr int IncreaseWork = 211, DecreaseWork = 212;
-constexpr int Apply = 201, Toggle = 202, RestNow = 203, Skip = 204;
+constexpr int Apply = 201, Toggle = 202, RestNow = 203, Skip = 204, Startup = 206, CloseMinimizes = 207, ForceRest = 208;
 constexpr int Status = 301, Open = 302, Exit = 303, Stop = 304;
 constexpr DWORD MainStyle = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
 constexpr DWORD MainExStyle = WS_EX_CONTROLPARENT;
@@ -230,6 +235,124 @@ void loadSettings() {
     settings = settingsStore.load();
 }
 
+std::wstring modulePath() {
+    wchar_t module[32768]{};
+    const DWORD length = GetModuleFileNameW(nullptr, module, ARRAYSIZE(module));
+    if (!length || length >= ARRAYSIZE(module)) return {};
+    return module;
+}
+
+std::wstring startupCommand() {
+    const auto path = modulePath();
+    return path.empty() ? path : L"\"" + path + L"\" --tray";
+}
+
+bool runValueMatches(const std::wstring& command) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                      0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS) return false;
+    DWORD bytes = 0, type = 0;
+    LONG status = RegQueryValueExW(key, L"RestCue", nullptr, &type, nullptr, &bytes);
+    if (status != ERROR_SUCCESS || type != REG_SZ || bytes < sizeof(wchar_t)) {
+        RegCloseKey(key);
+        return false;
+    }
+    std::wstring data(bytes / sizeof(wchar_t), L'\0');
+    status = RegQueryValueExW(key, L"RestCue", nullptr, &type, reinterpret_cast<BYTE*>(data.data()), &bytes);
+    RegCloseKey(key);
+    if (status != ERROR_SUCCESS) return false;
+    data.resize(wcslen(data.c_str()));
+    return data == command;
+}
+
+bool writeRunKey(bool enabled, DWORD* errorOut) {
+    HKEY key = nullptr;
+    LONG status = RegOpenKeyExW(HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_SET_VALUE, &key);
+    if (status != ERROR_SUCCESS) {
+        status = RegCreateKeyExW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            0, nullptr, 0, KEY_SET_VALUE, nullptr, &key, nullptr);
+    }
+    if (status != ERROR_SUCCESS) {
+        if (errorOut) *errorOut = static_cast<DWORD>(status);
+        return false;
+    }
+    if (!enabled) {
+        status = RegDeleteValueW(key, L"RestCue");
+        RegCloseKey(key);
+        if (status == ERROR_FILE_NOT_FOUND) status = ERROR_SUCCESS;
+        if (errorOut) *errorOut = static_cast<DWORD>(status);
+        return status == ERROR_SUCCESS;
+    }
+    const auto command = startupCommand();
+    if (command.empty()) {
+        RegCloseKey(key);
+        if (errorOut) *errorOut = ERROR_INSUFFICIENT_BUFFER;
+        return false;
+    }
+    status = RegSetValueExW(key, L"RestCue", 0, REG_SZ,
+        reinterpret_cast<const BYTE*>(command.c_str()),
+        static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+    RegCloseKey(key);
+    if (errorOut) *errorOut = static_cast<DWORD>(status);
+    return status == ERROR_SUCCESS;
+}
+
+bool writeStartupShortcut(bool enabled, DWORD* errorOut) {
+    wchar_t startup[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_STARTUP, nullptr, SHGFP_TYPE_CURRENT, startup))) {
+        if (errorOut) *errorOut = ERROR_PATH_NOT_FOUND;
+        return false;
+    }
+    const std::wstring linkPath = std::wstring(startup) + L"\\RestCue.lnk";
+    if (!enabled) {
+        if (DeleteFileW(linkPath.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND) return true;
+        if (errorOut) *errorOut = GetLastError();
+        return false;
+    }
+    const auto path = modulePath();
+    if (path.empty()) {
+        if (errorOut) *errorOut = ERROR_INSUFFICIENT_BUFFER;
+        return false;
+    }
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const bool uninit = init == S_OK;
+    HRESULT hr = (init == RPC_E_CHANGED_MODE) ? S_OK : init;
+    IShellLinkW* link = nullptr;
+    if (SUCCEEDED(hr))
+        hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW,
+                              reinterpret_cast<void**>(&link));
+    if (SUCCEEDED(hr)) hr = link->SetPath(path.c_str());
+    if (SUCCEEDED(hr)) hr = link->SetArguments(L"--tray");
+    if (SUCCEEDED(hr)) hr = link->SetDescription(L"RestCue");
+    IPersistFile* file = nullptr;
+    if (SUCCEEDED(hr)) hr = link->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&file));
+    if (SUCCEEDED(hr)) hr = file->Save(linkPath.c_str(), TRUE);
+    if (file) file->Release();
+    if (link) link->Release();
+    if (uninit) CoUninitialize();
+    if (FAILED(hr)) {
+        if (errorOut) *errorOut = HRESULT_CODE(hr);
+        return false;
+    }
+    return true;
+}
+
+bool setLaunchAtStartup(bool enabled, DWORD* errorOut) {
+    DWORD registryError = ERROR_ACCESS_DENIED, shortcutError = ERROR_ACCESS_DENIED;
+    if (writeRunKey(enabled, &registryError)) return true;
+    if (writeStartupShortcut(enabled, &shortcutError)) return true;
+    const auto command = startupCommand();
+    if (enabled && !command.empty() && runValueMatches(command)) return true;
+    if (errorOut) *errorOut = registryError ? registryError : shortcutError;
+    return false;
+}
+
+bool boxChecked(int id) {
+    return SendMessageW(GetDlgItem(mainWindow, id), BM_GETCHECK, 0, 0) == BST_CHECKED;
+}
+
 bool applySettings() {
     unsigned work = 0, minutes = 0, seconds = 0, opacity = 0;
     if (!readNumber(WorkEdit, work) || !readNumber(RestMinEdit, minutes) ||
@@ -242,7 +365,8 @@ bool applySettings() {
             Title, MB_OK | MB_ICONWARNING);
         return false;
     }
-    Settings updated{work, minutes * 60 + seconds, opacity};
+    Settings updated{work, minutes * 60 + seconds, opacity, boxChecked(Startup), boxChecked(CloseMinimizes),
+                    boxChecked(ForceRest)};
     const auto saved = settingsStore.save(updated);
     if (!saved.success) {
         std::wstring message = L"无法保存设置。本次运行仍会生效，但重启后可能无法恢复。\n\n";
@@ -254,6 +378,16 @@ bool applySettings() {
         }
         message += L"请检查上述目录的写入权限或文件是否只读；可将程序放在可写目录中运行。";
         MessageBoxW(mainWindow, message.c_str(), Title, MB_OK | MB_ICONWARNING);
+    } else if (updated.launchAtStartup != settings.launchAtStartup || updated.launchAtStartup) {
+        DWORD startupError = ERROR_SUCCESS;
+        if (!setLaunchAtStartup(updated.launchAtStartup, &startupError)) {
+            wchar_t description[512]{};
+            FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                nullptr, startupError, 0, description, ARRAYSIZE(description), nullptr);
+            const std::wstring message = L"设置已保存，但无法写入开机自启。\n错误 " +
+                std::to_wstring(startupError) + L"：" + description;
+            MessageBoxW(mainWindow, message.c_str(), Title, MB_OK | MB_ICONWARNING);
+        }
     }
     settings = updated;
     return true;
@@ -275,7 +409,10 @@ void createControls() {
     add(L"EDIT", L"", OpacityEdit, layout::OpacityValue, editStyle);
     // Retain a standard text control for automation/accessibility status queries.
     addControl(L"STATIC", L"", Status, 0, 0, 0, 0);
-    add(L"BUTTON", L"保存并开始", Apply, layout::Apply, buttonStyle);
+    add(L"BUTTON", L"开机自启", Startup, layout::Startup, WS_TABSTOP | BS_AUTOCHECKBOX);
+    add(L"BUTTON", L"关闭时最小化到托盘", CloseMinimizes, layout::CloseMinimizes, WS_TABSTOP | BS_AUTOCHECKBOX);
+    add(L"BUTTON", L"强制休息", ForceRest, layout::ForceRest, WS_TABSTOP | BS_AUTOCHECKBOX);
+    add(L"BUTTON", L"保存", Apply, layout::Apply, buttonStyle);
     add(L"BUTTON", L"暂停", Toggle, layout::Pause, buttonStyle);
     add(L"BUTTON", L"立即休息", RestNow, layout::Rest, buttonStyle);
     add(L"BUTTON", L"跳过休息", Skip, layout::Skip, buttonStyle);
@@ -286,7 +423,60 @@ void createControls() {
     setNumber(RestMinEdit, settings.restSeconds / 60);
     setNumber(RestSecEdit, settings.restSeconds % 60);
     setNumber(OpacityEdit, settings.opacity);
+    SendDlgItemMessageW(mainWindow, Startup, BM_SETCHECK,
+                        settings.launchAtStartup ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessageW(mainWindow, CloseMinimizes, BM_SETCHECK,
+                        settings.closeMinimizes ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendDlgItemMessageW(mainWindow, ForceRest, BM_SETCHECK,
+                        settings.forceRest ? BST_CHECKED : BST_UNCHECKED, 0);
     layoutControls();
+}
+
+bool trayPromoted = false;
+int trayPromoteTries = 0;
+
+bool sameExePath(const wchar_t* left, const wchar_t* right) {
+    return left && right && CompareStringOrdinal(left, -1, right, -1, TRUE) == CSTR_EQUAL;
+}
+
+// Windows 11 puts new icons behind the overflow arrow. IsPromoted=1 shows ours
+// in the visible tray. IsPromoted=0 is the user hiding it, so leave that alone.
+void promoteTrayIcon() {
+    if (trayPromoted || !trayVisible || trayPromoteTries > 200) return;
+    ++trayPromoteTries;
+    const auto path = modulePath();
+    if (path.empty()) return;
+    HKEY root = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\NotifyIconSettings", 0,
+                      KEY_ENUMERATE_SUB_KEYS | KEY_QUERY_VALUE, &root) != ERROR_SUCCESS)
+        return;
+    wchar_t name[256];
+    for (DWORD index = 0;; ++index) {
+        DWORD nameLen = ARRAYSIZE(name);
+        if (RegEnumKeyExW(root, index, name, &nameLen, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+        HKEY sub = nullptr;
+        if (RegOpenKeyExW(root, name, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &sub) != ERROR_SUCCESS) continue;
+        wchar_t exe[1024]{};
+        DWORD bytes = sizeof(exe), type = 0;
+        const LONG query = RegQueryValueExW(sub, L"ExecutablePath", nullptr, &type,
+                                             reinterpret_cast<BYTE*>(exe), &bytes);
+        if (query == ERROR_SUCCESS && type == REG_SZ && sameExePath(exe, path.c_str())) {
+            DWORD promoted = 0, pbytes = sizeof(promoted), ptype = 0;
+            const LONG read = RegQueryValueExW(sub, L"IsPromoted", nullptr, &ptype,
+                                                reinterpret_cast<BYTE*>(&promoted), &pbytes);
+            if (!(read == ERROR_SUCCESS && ptype == REG_DWORD && promoted == 0)) {
+                if (!(read == ERROR_SUCCESS && ptype == REG_DWORD && promoted == 1)) {
+                    const DWORD show = 1;
+                    RegSetValueExW(sub, L"IsPromoted", 0, REG_DWORD,
+                                   reinterpret_cast<const BYTE*>(&show), sizeof(show));
+                }
+            }
+            trayPromoted = true;
+        }
+        RegCloseKey(sub);
+        if (trayPromoted) break;
+    }
+    RegCloseKey(root);
 }
 
 void addTray() {
@@ -296,13 +486,17 @@ void addTray() {
     tray.uID = 1;
     tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     tray.uCallbackMessage = TrayMessage;
-    tray.hIcon = loadAppIcon(GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON));
+    const int iconSize = GetSystemMetrics(SM_CXSMICON);
+    tray.hIcon = loadAppIcon(iconSize, iconSize);
+    if (!tray.hIcon) tray.hIcon = loadAppIcon(16, 16);
+    if (!tray.hIcon) tray.hIcon = loadAppIcon(24, 24);
     StringCchCopyW(tray.szTip, ARRAYSIZE(tray.szTip), Title);
     trayVisible = Shell_NotifyIconW(NIM_ADD, &tray) != FALSE;
-    if (!trayVisible) {
-        // Never leave an invisible application that the user cannot reopen.
-        ShowWindow(mainWindow, SW_RESTORE);
-    }
+    if (!trayVisible) trayVisible = Shell_NotifyIconW(NIM_MODIFY, &tray) != FALSE;
+    trayPromoted = false;
+    trayPromoteTries = 0;
+    if (trayVisible) promoteTrayIcon();
+    else ShowWindow(mainWindow, SW_RESTORE);
 }
 
 std::wstring clockText(std::uint64_t milliseconds) {
@@ -411,8 +605,9 @@ void refresh() {
     case restcue::Phase::Working: text = L"工作中 · 距离下次休息 " + clockText(timer.remaining(now)); break;
     case restcue::Phase::Resting: text = L"休息中 · 剩余 " + clockText(timer.remaining(now)); break;
     case restcue::Phase::Paused: text = L"已暂停 · 剩余 " + clockText(timer.remaining(now)); break;
-    default: text = L"已停止 · 点击“保存并开始”启用提醒"; break;
+    default: text = L"已停止 · 点击“保存”启用提醒"; break;
     }
+    if (trayVisible && !trayPromoted) promoteTrayIcon();
     if (text != lastStatus) {
         SetDlgItemTextW(mainWindow, Status, text.c_str());
         lastStatus = text;
@@ -429,7 +624,9 @@ void refresh() {
     wchar_t current[16]{};
     GetDlgItemTextW(mainWindow, Toggle, current, ARRAYSIZE(current));
     if (wcscmp(label, current) != 0) SetDlgItemTextW(mainWindow, Toggle, label);
-    const bool canPause = phase != restcue::Phase::Stopped, canSkip = phase == restcue::Phase::Resting;
+    const bool forced = boxChecked(ForceRest);
+    const bool canPause = phase != restcue::Phase::Stopped && !(forced && phase == restcue::Phase::Resting);
+    const bool canSkip = phase == restcue::Phase::Resting && !forced;
     if ((IsWindowEnabled(GetDlgItem(mainWindow, Toggle)) != FALSE) != canPause) EnableWindow(GetDlgItem(mainWindow, Toggle), canPause);
     if ((IsWindowEnabled(GetDlgItem(mainWindow, Skip)) != FALSE) != canSkip) EnableWindow(GetDlgItem(mainWindow, Skip), canSkip);
 }
@@ -439,10 +636,13 @@ void trayMenu() {
     if (!menu) return;
     const auto phase = timer.phase();
     AppendMenuW(menu, MF_STRING, Open, L"打开设置");
-    AppendMenuW(menu, MF_STRING | (phase == restcue::Phase::Stopped ? MF_GRAYED : 0), Toggle,
+    const bool canPause = phase != restcue::Phase::Stopped &&
+        !(boxChecked(ForceRest) && phase == restcue::Phase::Resting);
+    AppendMenuW(menu, MF_STRING | (canPause ? 0 : MF_GRAYED), Toggle,
                 phase == restcue::Phase::Paused ? L"继续提醒" : L"暂停提醒");
     AppendMenuW(menu, MF_STRING, RestNow, L"立即休息");
-    AppendMenuW(menu, MF_STRING | (phase == restcue::Phase::Resting ? 0 : MF_GRAYED), Skip, L"跳过本次休息");
+    AppendMenuW(menu, MF_STRING | (phase == restcue::Phase::Resting && !boxChecked(ForceRest) ? 0 : MF_GRAYED),
+                Skip, L"跳过本次休息");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, Exit, L"退出");
     POINT point{};
@@ -464,6 +664,7 @@ void command(int id) {
                     static_cast<std::uint64_t>(settings.restSeconds) * 1000);
         break;
     case Toggle:
+        if (boxChecked(ForceRest) && timer.phase() == restcue::Phase::Resting) break;
         if (timer.phase() == restcue::Phase::Paused) timer.resume(now);
         else timer.pause(now);
         break;
@@ -472,7 +673,9 @@ void command(int id) {
         hideOverlays();
         timer.restNow(now);
         break;
-    case Skip: timer.skipRest(now); break;
+    case Skip:
+        if (!boxChecked(ForceRest)) timer.skipRest(now);
+        break;
     case Stop: timer.stop(); break;
     case IncreaseWork:
     case DecreaseWork: {
@@ -482,6 +685,15 @@ void command(int id) {
         setNumber(WorkEdit, static_cast<unsigned>(next));
         break;
     }
+    case CloseMinimizes:
+        settings.closeMinimizes = boxChecked(CloseMinimizes);
+        settingsStore.save(settings);
+        return;
+    case ForceRest:
+        settings.forceRest = boxChecked(ForceRest);
+        settingsStore.save(settings);
+        for (HWND card : restCards) InvalidateRect(card, nullptr, FALSE);
+        return;
     case Open: showMain(); break;
     case Exit: DestroyWindow(mainWindow); return;
     default: return;
@@ -492,8 +704,7 @@ void command(int id) {
 void drawMain(HDC dc) {
     RECT client{};
     GetClientRect(mainWindow, &client);
-    restcue::theme::Surface buffer;
-    if (!buffer.resize(dc, client.right, client.bottom)) return;
+    if (client.right <= 0 || client.bottom <= 0) return;
     std::wstring phase;
     switch (timer.phase()) {
     case restcue::Phase::Working: phase = L"工作中 · 距离休息"; break;
@@ -501,18 +712,64 @@ void drawMain(HDC dc) {
     case restcue::Phase::Paused: phase = L"已暂停 · 剩余时间"; break;
     default: phase = L"已停止提醒"; break;
     }
-    {
-        Gdiplus::Graphics graphics(buffer.dc());
+    const auto countdown = clockText(timer.remaining(GetTickCount64()));
+    const int focus = GetDlgCtrlID(GetFocus());
+    const bool active = timer.phase() == restcue::Phase::Working || timer.phase() == restcue::Phase::Resting;
+    // Keep the last frame. A mouse move can invalidate a few letters; re-rendering
+    // ClearType text into that spot makes those letters flicker.
+    struct Cache {
+        restcue::theme::Surface surface;
+        std::wstring phase, countdown;
+        int focus = -1, width = 0, height = 0;
+        bool active = false;
+    };
+    static Cache cache;
+    if (cache.width != client.right || cache.height != client.bottom || cache.phase != phase ||
+        cache.countdown != countdown || cache.focus != focus || cache.active != active || !cache.surface.dc()) {
+        if (!cache.surface.resize(dc, client.right, client.bottom)) return;
+        Gdiplus::Graphics graphics(cache.surface.dc());
         graphics.Clear(restcue::theme::opaque(restcue::theme::Background));
-        const float scale = client.right > 0
-            ? static_cast<float>(client.right) / restcue::theme::MainWidth
-            : restcue::theme::SettingsScale;
-        restcue::theme::mainPanel(graphics, scale, phase,
-            clockText(timer.remaining(GetTickCount64())),
-            timer.phase() == restcue::Phase::Working || timer.phase() == restcue::Phase::Resting,
-            GetDlgCtrlID(GetFocus()));
+        const float scale = static_cast<float>(client.right) / restcue::theme::MainWidth;
+        restcue::theme::mainPanel(graphics, scale, phase, countdown, active, focus);
+        cache.phase = phase;
+        cache.countdown = countdown;
+        cache.focus = focus;
+        cache.width = client.right;
+        cache.height = client.bottom;
+        cache.active = active;
     }
-    BitBlt(dc, 0, 0, client.right, client.bottom, buffer.dc(), 0, 0, SRCCOPY);
+    BitBlt(dc, 0, 0, client.right, client.bottom, cache.surface.dc(), 0, 0, SRCCOPY);
+}
+
+void blitBuffered(HDC dc, int width, int height, void (*paint)(HDC, int, int, LPARAM), LPARAM param) {
+    restcue::theme::Surface buffer;
+    if (width <= 0 || height <= 0 || !buffer.resize(dc, width, height)) return;
+    paint(buffer.dc(), width, height, param);
+    BitBlt(dc, 0, 0, width, height, buffer.dc(), 0, 0, SRCCOPY);
+}
+
+struct ButtonPaint {
+    HWND hwnd;
+    const wchar_t* label;
+    UINT id;
+    UINT state;
+};
+
+void paintButton(HDC dc, int width, int height, LPARAM param) {
+    const auto* item = reinterpret_cast<const ButtonPaint*>(param);
+    const Gdiplus::RectF rect(0, 0, static_cast<float>(width), static_cast<float>(height));
+    RECT bounds{0, 0, width, height};
+    POINT point{};
+    GetCursorPos(&point);
+    ScreenToClient(item->hwnd, &point);
+    const bool hover = PtInRect(&bounds, point) != FALSE;
+    const bool pressed = (item->state & ODS_SELECTED) != 0;
+    const bool focus = (item->state & ODS_FOCUS) != 0;
+    const bool enabled = !(item->state & ODS_DISABLED);
+    if (item->id == IncreaseWork || item->id == DecreaseWork)
+        restcue::theme::stepper(dc, rect, item->id == IncreaseWork, enabled, pressed, hover, focus);
+    else
+        restcue::theme::button(dc, rect, item->label, item->id == Apply, enabled, pressed, hover, focus);
 }
 
 void drawButton(const DRAWITEMSTRUCT& item) {
@@ -520,29 +777,52 @@ void drawButton(const DRAWITEMSTRUCT& item) {
     GetWindowTextW(item.hwndItem, label, ARRAYSIZE(label));
     RECT bounds{};
     GetClientRect(item.hwndItem, &bounds);
-    const Gdiplus::RectF rect(0, 0, static_cast<float>(bounds.right), static_cast<float>(bounds.bottom));
+    ButtonPaint paint{item.hwndItem, label, static_cast<UINT>(item.CtlID), item.itemState};
+    blitBuffered(item.hDC, bounds.right, bounds.bottom, paintButton, reinterpret_cast<LPARAM>(&paint));
+}
+
+void paintCheck(HDC dc, int width, int height, LPARAM param) {
+    HWND hwnd = reinterpret_cast<HWND>(param);
+    wchar_t label[80]{};
+    GetWindowTextW(hwnd, label, ARRAYSIZE(label));
+    RECT bounds{0, 0, width, height};
     POINT point{};
     GetCursorPos(&point);
-    ScreenToClient(item.hwndItem, &point);
-    if (item.CtlID == IncreaseWork || item.CtlID == DecreaseWork) {
-        restcue::theme::stepper(item.hDC, rect, item.CtlID == IncreaseWork,
-            !(item.itemState & ODS_DISABLED), (item.itemState & ODS_SELECTED) != 0,
-            PtInRect(&bounds, point) != FALSE, (item.itemState & ODS_FOCUS) != 0);
-        return;
-    }
-    restcue::theme::button(item.hDC, rect, label, item.CtlID == Apply,
-        !(item.itemState & ODS_DISABLED), (item.itemState & ODS_SELECTED) != 0,
-        PtInRect(&bounds, point) != FALSE, (item.itemState & ODS_FOCUS) != 0);
+    ScreenToClient(hwnd, &point);
+    const bool hover = PtInRect(&bounds, point) != FALSE;
+    restcue::theme::checkBox(dc, Gdiplus::RectF(0, 0, static_cast<float>(width), static_cast<float>(height)),
+        label, SendMessageW(hwnd, BM_GETCHECK, 0, 0) == BST_CHECKED,
+        (GetKeyState(VK_LBUTTON) & 0x8000) && hover, hover, GetFocus() == hwnd);
 }
 
 LRESULT CALLBACK buttonProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR id, DWORD_PTR) {
+    const int controlId = GetDlgCtrlID(hwnd);
+    const bool customCheck = controlId == Startup || controlId == CloseMinimizes || controlId == ForceRest;
+    if (message == WM_ERASEBKGND) return 1;
+    if (customCheck && message == WM_PAINT) {
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hwnd, &ps);
+        RECT bounds{};
+        GetClientRect(hwnd, &bounds);
+        blitBuffered(dc, bounds.right, bounds.bottom, paintCheck, reinterpret_cast<LPARAM>(hwnd));
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
     if (message == WM_MOUSEMOVE) {
         TRACKMOUSEEVENT tracking{sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0};
         TrackMouseEvent(&tracking);
-        InvalidateRect(hwnd, nullptr, FALSE);
+        if (!GetPropW(hwnd, L"RestCueHover")) {
+            SetPropW(hwnd, L"RestCueHover", reinterpret_cast<HANDLE>(1));
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        // The standard button procedure invalidates on every move, which flashes the label.
+        // Captured moves still need the default handler so a click can be cancelled.
+        if (GetCapture() != hwnd) return 0;
     } else if (message == WM_MOUSELEAVE || message == WM_SETFOCUS || message == WM_KILLFOCUS) {
+        RemovePropW(hwnd, L"RestCueHover");
         InvalidateRect(hwnd, nullptr, FALSE);
     } else if (message == WM_NCDESTROY) {
+        RemovePropW(hwnd, L"RestCueHover");
         RemoveWindowSubclass(hwnd, buttonProc, id);
     }
     return DefSubclassProc(hwnd, message, wParam, lParam);
@@ -614,7 +894,8 @@ void drawRestSurface(HWND hwnd, HDC dc) {
     if (state->card) {
         const auto remaining = timer.remaining(GetTickCount64());
         state->scene.paintCard(dc, client.right, client.bottom, clockText(remaining),
-            static_cast<float>(remaining) / static_cast<float>(timer.restDuration()));
+            static_cast<float>(remaining) / static_cast<float>(timer.restDuration()),
+            boxChecked(ForceRest) ? L"请完成本次休息" : L"右键单击退出本次休息");
     } else {
         state->scene.paintShade(dc, client.right, client.bottom);
     }
@@ -645,8 +926,12 @@ LRESULT CALLBACK overlayProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPar
     case WM_SETCURSOR:
         SetCursor(LoadCursorW(nullptr, IDC_ARROW));
         return TRUE;
-    case WM_RBUTTONUP: PostMessageW(mainWindow, WM_COMMAND, Skip, 0); return 0;
-    case WM_CLOSE: PostMessageW(mainWindow, WM_COMMAND, Skip, 0); return 0;
+    case WM_RBUTTONUP:
+        if (!boxChecked(ForceRest)) PostMessageW(mainWindow, WM_COMMAND, Skip, 0);
+        return 0;
+    case WM_CLOSE:
+        if (!boxChecked(ForceRest)) PostMessageW(mainWindow, WM_COMMAND, Skip, 0);
+        return 0;
     case WM_DPICHANGED: {
         const RECT* rect = reinterpret_cast<RECT*>(lParam);
         SetWindowPos(hwnd, HWND_TOPMOST, rect->left, rect->top, rect->right - rect->left,
@@ -751,7 +1036,7 @@ LRESULT CALLBACK mainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
         return reinterpret_cast<LRESULT>(darkBrush);
     case WM_CLOSE:
         restoreSettingsAfterRest = false;
-        if (trayVisible) ShowWindow(hwnd, SW_HIDE);
+        if (boxChecked(CloseMinimizes) && trayVisible) ShowWindow(hwnd, SW_HIDE);
         else DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
@@ -770,13 +1055,16 @@ LRESULT CALLBACK mainProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 }
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int showCommand) {
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR commandLine, int showCommand) {
     instance = hInstance;
+    const bool startInTray = commandLine && wcsstr(commandLine, L"--tray") != nullptr;
     HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\RestCue.SingleInstance");
     if (!mutex) return 1;
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        HWND existing = FindWindowW(MainClass, nullptr);
-        if (existing) { ShowWindow(existing, SW_RESTORE); SetForegroundWindow(existing); }
+        if (!startInTray) {
+            HWND existing = FindWindowW(MainClass, nullptr);
+            if (existing) { ShowWindow(existing, SW_RESTORE); SetForegroundWindow(existing); }
+        }
         CloseHandle(mutex);
         return 0;
     }
@@ -792,6 +1080,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int showCommand) {
     auto setAwareness = reinterpret_cast<SetAwareness>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext"));
     if (!setAwareness || !setAwareness(reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4)))) SetProcessDPIAware();
     loadSettings();
+    if (settings.launchAtStartup) setLaunchAtStartup(true, nullptr);
     taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
     WNDCLASSEXW cls{};
@@ -834,8 +1123,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR, int showCommand) {
         CloseHandle(mutex);
         return 1;
     }
-    ShowWindow(hwnd, showCommand);
-    UpdateWindow(hwnd);
+    if (!(startInTray && trayVisible)) {
+        ShowWindow(hwnd, showCommand);
+        UpdateWindow(hwnd);
+    }
     fitMainWindow(hwnd, dpiFor(hwnd), nullptr);
     MSG message{};
     BOOL result;

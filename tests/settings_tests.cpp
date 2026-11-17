@@ -12,7 +12,9 @@ void expect(bool ok, const char* description) {
     if (!ok) { std::fprintf(stderr, "FAILED: %s (Win32=%lu)\n", description, GetLastError()); std::exit(1); }
 }
 bool same(const restcue::Settings& a, const restcue::Settings& b) {
-    return a.workMinutes == b.workMinutes && a.restSeconds == b.restSeconds && a.opacity == b.opacity;
+    return a.workMinutes == b.workMinutes && a.restSeconds == b.restSeconds &&
+           a.opacity == b.opacity && a.launchAtStartup == b.launchAtStartup &&
+           a.closeMinimizes == b.closeMinimizes && a.forceRest == b.forceRest;
 }
 void touch(const std::wstring& path) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -116,5 +118,11 @@ int main() {
            "invalid new configuration falls back to valid legacy settings");
     expect(same(SettingsStore(blockedPath, L"", {malformed}).load(), Settings{}),
            "invalid legacy settings fall back to defaults");
+    Settings startupOn = updated;
+    startupOn.launchAtStartup = true;
+    expect(store.save(startupOn).success && same(SettingsStore(portable, user).load(), startupOn),
+           "startup preference round-trips");
+    expect(store.save(updated).success && !SettingsStore(portable, user).load().launchAtStartup,
+           "startup preference can be turned off");
     std::printf("%u settings checks passed\n", checks);
 }
