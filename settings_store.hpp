@@ -11,12 +11,24 @@
 namespace restcue {
 
 struct Settings {
+    static constexpr unsigned MinWorkMinutes = 1, MaxWorkMinutes = 1440;
+    static constexpr unsigned MinRestSeconds = 1, MaxRestSeconds = 7200;
+    static constexpr unsigned MaxRestMinutes = MaxRestSeconds / 60;
+    static constexpr unsigned MaxRestSecondsPart = 59;
+    static constexpr unsigned MinOpacity = 10, MaxOpacity = 95;
+
     unsigned workMinutes = 45;
     unsigned restSeconds = 300;
     unsigned opacity = 70;
     bool launchAtStartup = false;
     bool closeMinimizes = true;
     bool forceRest = false;
+
+    constexpr bool valid() const {
+        return workMinutes >= MinWorkMinutes && workMinutes <= MaxWorkMinutes &&
+               restSeconds >= MinRestSeconds && restSeconds <= MaxRestSeconds &&
+               opacity >= MinOpacity && opacity <= MaxOpacity;
+    }
 };
 
 struct SaveFailure { std::wstring path; DWORD error; };
@@ -83,16 +95,14 @@ public:
                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (input == INVALID_HANDLE_VALUE) continue;
             CloseHandle(input);
-            const auto work = GetPrivateProfileIntW(L"Timer", L"WorkMinutes", 0, file.path.c_str());
-            const auto rest = GetPrivateProfileIntW(L"Timer", L"RestSeconds", 0, file.path.c_str());
-            const auto opacity = GetPrivateProfileIntW(L"Timer", L"Opacity", 0, file.path.c_str());
-            if (work >= 1 && work <= 1440 && rest >= 1 && rest <= 7200 && opacity >= 10 && opacity <= 95) {
-                const auto startup = GetPrivateProfileIntW(L"Timer", L"LaunchAtStartup", 0, file.path.c_str());
-                const auto closeMinimizes = GetPrivateProfileIntW(L"Timer", L"CloseMinimizes", 1, file.path.c_str());
-                const auto forceRest = GetPrivateProfileIntW(L"Timer", L"ForceRest", 0, file.path.c_str());
-                return {static_cast<unsigned>(work), static_cast<unsigned>(rest),
-                        static_cast<unsigned>(opacity), startup != 0, closeMinimizes != 0, forceRest != 0};
-            }
+            const UINT work = GetPrivateProfileIntW(L"Timer", L"WorkMinutes", 0, file.path.c_str());
+            const UINT rest = GetPrivateProfileIntW(L"Timer", L"RestSeconds", 0, file.path.c_str());
+            const UINT opacity = GetPrivateProfileIntW(L"Timer", L"Opacity", 0, file.path.c_str());
+            const UINT startup = GetPrivateProfileIntW(L"Timer", L"LaunchAtStartup", 0, file.path.c_str());
+            const UINT closeMinimizes = GetPrivateProfileIntW(L"Timer", L"CloseMinimizes", 1, file.path.c_str());
+            const UINT forceRest = GetPrivateProfileIntW(L"Timer", L"ForceRest", 0, file.path.c_str());
+            const Settings candidate{work, rest, opacity, startup != 0, closeMinimizes != 0, forceRest != 0};
+            if (candidate.valid()) return candidate;
         }
         return {};
     }

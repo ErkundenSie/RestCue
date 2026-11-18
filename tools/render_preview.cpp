@@ -1,5 +1,9 @@
+#ifndef UNICODE
 #define UNICODE
+#endif
+#ifndef _UNICODE
 #define _UNICODE
+#endif
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include "../theme.hpp"
@@ -53,8 +57,19 @@ int main() {
                 up, true, false, false, false);
         BitBlt(main.dc(), pixel(p.x), pixel(p.y), width, height, part.dc(), 0, 0, SRCCOPY);
     };
+    auto check = [&](layout::Placement p, const wchar_t* label, bool checked) {
+        Surface part;
+        const int width = pixel(p.width), height = pixel(p.height);
+        part.resize(main.dc(), width, height);
+        checkBox(part.dc(), Gdiplus::RectF(0, 0, static_cast<float>(width), static_cast<float>(height)),
+                 label, checked, false, false, false);
+        BitBlt(main.dc(), pixel(p.x), pixel(p.y), width, height, part.dc(), 0, 0, SRCCOPY);
+    };
     arrow(layout::WorkUp, true);
     arrow(layout::WorkDown, false);
+    check(layout::Startup, L"开机自启", false);
+    check(layout::CloseMinimizes, L"关闭时最小化到托盘", true);
+    check(layout::ForceRest, L"强制休息", false);
     child(layout::Apply, L"保存", true, true);
     child(layout::Pause, L"暂停", false, true);
     child(layout::Rest, L"立即休息", false, true);

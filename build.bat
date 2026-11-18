@@ -17,13 +17,17 @@ exit /b 1
 :msvc
 rc /nologo /fo%OUTDIR%\restcue.res restcue.rc
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++17 /EHsc /O2 /W4 /utf-8 /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0A00 main.cpp %OUTDIR%\restcue.res /Fo%OUTDIR%\main.obj /Fe%OUTDIR%\RestCue.exe /link /MANIFEST:NO /SUBSYSTEM:WINDOWS user32.lib gdi32.lib shell32.lib ole32.lib gdiplus.lib comctl32.lib dwmapi.lib advapi32.lib
+cl /nologo /std:c++17 /EHsc /O2 /W4 /permissive- /utf-8 /MT /DUNICODE /D_UNICODE /D_WIN32_WINNT=0x0A00 main.cpp %OUTDIR%\restcue.res /Fo%OUTDIR%\main.obj /Fe%OUTDIR%\RestCue.exe /link /MANIFEST:NO /SUBSYSTEM:WINDOWS user32.lib gdi32.lib shell32.lib ole32.lib gdiplus.lib comctl32.lib dwmapi.lib advapi32.lib
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++17 /EHsc /W4 /utf-8 /MT tests\timer_tests.cpp /Fo%OUTDIR%\timer_tests.obj /Fe%OUTDIR%\timer_tests.exe
+cl /nologo /std:c++17 /EHsc /W4 /permissive- /utf-8 /MT tests\timer_tests.cpp /Fo%OUTDIR%\timer_tests.obj /Fe%OUTDIR%\timer_tests.exe
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++17 /EHsc /W4 /utf-8 /MT tests\settings_tests.cpp /Fo%OUTDIR%\settings_tests.obj /Fe%OUTDIR%\settings_tests.exe /link shell32.lib ole32.lib
+cl /nologo /std:c++17 /EHsc /W4 /permissive- /utf-8 /MT tests\settings_tests.cpp /Fo%OUTDIR%\settings_tests.obj /Fe%OUTDIR%\settings_tests.exe /link shell32.lib ole32.lib
 if errorlevel 1 exit /b 1
-cl /nologo /std:c++17 /EHsc /W4 /utf-8 /MT tests\overlay_tests.cpp /Fo%OUTDIR%\overlay_tests.obj /Fe%OUTDIR%\overlay_tests.exe /link gdiplus.lib gdi32.lib user32.lib
+cl /nologo /std:c++17 /EHsc /W4 /permissive- /utf-8 /MT tests\startup_tests.cpp /Fo%OUTDIR%\startup_tests.obj /Fe%OUTDIR%\startup_tests.exe /link advapi32.lib shell32.lib ole32.lib
+if errorlevel 1 exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /permissive- /utf-8 /MT tests\overlay_tests.cpp /Fo%OUTDIR%\overlay_tests.obj /Fe%OUTDIR%\overlay_tests.exe /link gdiplus.lib gdi32.lib user32.lib
+if errorlevel 1 exit /b 1
+cl /nologo /std:c++17 /EHsc /W4 /permissive- /utf-8 /MT tools\render_preview.cpp /Fo%OUTDIR%\render_preview.obj /Fe%OUTDIR%\render_preview.exe /link gdiplus.lib gdi32.lib user32.lib
 if errorlevel 1 exit /b 1
 goto test
 
@@ -36,7 +40,11 @@ g++ -std=c++17 -O2 -Wall -Wextra -static tests\timer_tests.cpp -o %OUTDIR%\timer
 if errorlevel 1 exit /b 1
 g++ -std=c++17 -O2 -Wall -Wextra -static tests\settings_tests.cpp -o %OUTDIR%\settings_tests.exe -lshell32 -lole32
 if errorlevel 1 exit /b 1
+g++ -std=c++17 -O2 -Wall -Wextra -static tests\startup_tests.cpp -o %OUTDIR%\startup_tests.exe -ladvapi32 -lshell32 -lole32
+if errorlevel 1 exit /b 1
 g++ -std=c++17 -O2 -Wall -Wextra -static tests\overlay_tests.cpp -o %OUTDIR%\overlay_tests.exe -lgdiplus -lgdi32 -luser32
+if errorlevel 1 exit /b 1
+g++ -std=c++17 -O2 -Wall -Wextra -static tools\render_preview.cpp -o %OUTDIR%\render_preview.exe -lgdiplus -lgdi32 -luser32
 if errorlevel 1 exit /b 1
 goto test
 
@@ -49,13 +57,19 @@ zig c++ -std=c++17 -O2 -Wall -Wextra -target x86_64-windows-gnu -static tests\ti
 if errorlevel 1 exit /b 1
 zig c++ -std=c++17 -O2 -Wall -Wextra -target x86_64-windows-gnu -static tests\settings_tests.cpp -o %OUTDIR%\settings_tests.exe -lshell32 -lole32
 if errorlevel 1 exit /b 1
+zig c++ -std=c++17 -O2 -Wall -Wextra -target x86_64-windows-gnu -static tests\startup_tests.cpp -o %OUTDIR%\startup_tests.exe -ladvapi32 -lshell32 -lole32
+if errorlevel 1 exit /b 1
 zig c++ -std=c++17 -O2 -Wall -Wextra -target x86_64-windows-gnu -static tests\overlay_tests.cpp -o %OUTDIR%\overlay_tests.exe -lgdiplus -lgdi32 -luser32
+if errorlevel 1 exit /b 1
+zig c++ -std=c++17 -O2 -Wall -Wextra -target x86_64-windows-gnu -static tools\render_preview.cpp -o %OUTDIR%\render_preview.exe -lgdiplus -lgdi32 -luser32
 if errorlevel 1 exit /b 1
 
 :test
 %OUTDIR%\timer_tests.exe
 if errorlevel 1 exit /b 1
 %OUTDIR%\settings_tests.exe
+if errorlevel 1 exit /b 1
+%OUTDIR%\startup_tests.exe
 if errorlevel 1 exit /b 1
 %OUTDIR%\overlay_tests.exe
 if errorlevel 1 exit /b 1

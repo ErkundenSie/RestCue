@@ -9,18 +9,29 @@
 #include <string>
 
 namespace restcue::theme {
-using namespace Gdiplus;
+
 constexpr COLORREF Background = RGB(246, 244, 239);
 constexpr COLORREF EditBackground = RGB(242, 245, 240);
 constexpr COLORREF Foreground = RGB(37, 57, 50);
 constexpr COLORREF MutedForeground = RGB(96, 113, 103);
 constexpr COLORREF CardBackground = RGB(255, 254, 251);
 constexpr COLORREF Accent = RGB(53, 115, 99);
-inline Color opaque(COLORREF color) { return Color(255, GetRValue(color), GetGValue(color), GetBValue(color)); }
+inline Gdiplus::Color opaque(COLORREF color) {
+    return Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color));
+}
 constexpr float MainWidth = 800, MainHeight = 532;
 // Compact the settings window only; rest overlays retain their own screen-relative layout.
 constexpr int SettingsScalePercent = 78;
 constexpr float SettingsScale = SettingsScalePercent / 100.0f;
+
+namespace controlId {
+inline constexpr int WorkEdit = 101, RestMinEdit = 102, RestSecEdit = 103;
+inline constexpr int OpacityEdit = 104, OpacitySlider = 105;
+inline constexpr int Apply = 201, Toggle = 202, RestNow = 203, Skip = 204;
+inline constexpr int Startup = 206, CloseMinimizes = 207, ForceRest = 208;
+inline constexpr int IncreaseWork = 211, DecreaseWork = 212;
+inline constexpr int Status = 301, Open = 302, Exit = 303, Stop = 304;
+} // namespace controlId
 
 namespace settingsLayout {
 struct Placement { int x, y, width, height; };
@@ -30,19 +41,22 @@ inline constexpr Placement OpacityTrack{290, 333, 326, 28}, OpacityValue{650, 33
 inline constexpr Placement Startup{40, 410, 140, 32}, CloseMinimizes{190, 410, 230, 32}, ForceRest{430, 410, 150, 32};
 inline constexpr Placement Apply{32, 452, 218, 48}, Pause{262, 452, 158, 48};
 inline constexpr Placement Rest{432, 452, 158, 48}, Skip{602, 452, 166, 48};
-}
+} // namespace settingsLayout
 
 class Runtime {
 public:
-    Runtime() { GdiplusStartupInput input; ok_ = GdiplusStartup(&token_, &input, nullptr) == Ok; }
-    ~Runtime() { if (ok_) GdiplusShutdown(token_); }
+    Runtime() {
+        Gdiplus::GdiplusStartupInput input;
+        ok_ = Gdiplus::GdiplusStartup(&token_, &input, nullptr) == Gdiplus::Ok;
+    }
+    ~Runtime() { if (ok_) Gdiplus::GdiplusShutdown(token_); }
     bool ok() const { return ok_; }
 private:
     ULONG_PTR token_ = 0;
     bool ok_ = false;
 };
 
-// Reuse full-screen buffers: foliage is painted once, not rebuilt every frame.
+// Reuse offscreen DIB buffers across frames to avoid per-tick reallocations.
 class Surface {
 public:
     ~Surface() { clear(); }
@@ -67,17 +81,17 @@ public:
         width_ = width; height_ = height;
         return true;
     }
-    HDC dc() const { return dc_; }
-    BYTE* bits() const { return static_cast<BYTE*>(bits_); }
-    int width() const { return width_; }
-    int height() const { return height_; }
-private:
     void clear() {
         if (dc_ && old_) SelectObject(dc_, old_);
         if (bitmap_) DeleteObject(bitmap_);
         if (dc_) DeleteDC(dc_);
         dc_ = nullptr; bitmap_ = nullptr; old_ = nullptr; bits_ = nullptr; width_ = height_ = 0;
     }
+    HDC dc() const { return dc_; }
+    BYTE* bits() const { return static_cast<BYTE*>(bits_); }
+    int width() const { return width_; }
+    int height() const { return height_; }
+private:
     HDC dc_ = nullptr;
     HBITMAP bitmap_ = nullptr;
     HGDIOBJ old_ = nullptr;
@@ -85,14 +99,15 @@ private:
     int width_ = 0, height_ = 0;
 };
 
-inline void setup(Graphics& g) {
+inline void setup(Gdiplus::Graphics& g) {
+    using namespace Gdiplus;
     g.SetSmoothingMode(SmoothingModeAntiAlias);
     g.SetPixelOffsetMode(PixelOffsetModeHalf);
     g.SetTextRenderingHint(TextRenderingHintClearTypeGridFit);
     g.SetCompositingQuality(CompositingQualityHighQuality);
 }
 
-inline void rounded(GraphicsPath& path, RectF r, float radius) {
+inline void rounded(Gdiplus::GraphicsPath& path, Gdiplus::RectF r, float radius) {
     const float d = std::min(radius * 2, std::min(r.Width, r.Height));
     path.AddArc(r.X, r.Y, d, d, 180, 90);
     path.AddArc(r.GetRight() - d, r.Y, d, d, 270, 90);
@@ -101,8 +116,9 @@ inline void rounded(GraphicsPath& path, RectF r, float radius) {
     path.CloseFigure();
 }
 
-inline void box(Graphics& g, RectF r, float radius, Color top, Color bottom,
-                Color border = Color(0, 0, 0, 0), float stroke = 1) {
+inline void box(Gdiplus::Graphics& g, Gdiplus::RectF r, float radius, Gdiplus::Color top, Gdiplus::Color bottom,
+                Gdiplus::Color border = Gdiplus::Color(0, 0, 0, 0), float stroke = 1) {
+    using namespace Gdiplus;
     GraphicsPath shape;
     rounded(shape, r, radius);
     LinearGradientBrush fill(PointF(r.X, r.Y), PointF(r.X, r.GetBottom()), top, bottom);
@@ -110,7 +126,8 @@ inline void box(Graphics& g, RectF r, float radius, Color top, Color bottom,
     if (border.GetA()) { Pen edge(border, stroke); g.DrawPath(&edge, &shape); }
 }
 
-inline void glow(Graphics& g, RectF area, Color color) {
+inline void glow(Gdiplus::Graphics& g, Gdiplus::RectF area, Gdiplus::Color color) {
+    using namespace Gdiplus;
     GraphicsPath shape;
     shape.AddEllipse(area);
     PathGradientBrush brush(&shape);
@@ -122,9 +139,11 @@ inline void glow(Graphics& g, RectF area, Color color) {
     g.FillPath(&brush, &shape);
 }
 
-inline void text(Graphics& g, const std::wstring& value, RectF area, float size,
-                 Color color, bool bold = false, StringAlignment align = StringAlignmentNear,
+inline void text(Gdiplus::Graphics& g, const std::wstring& value, Gdiplus::RectF area, float size,
+                 Gdiplus::Color color, bool bold = false,
+                 Gdiplus::StringAlignment align = Gdiplus::StringAlignmentNear,
                  const wchar_t* familyName = L"Microsoft YaHei UI") {
+    using namespace Gdiplus;
     // A world scale (the compact 78% layout, or a DPI change) would rasterize glyphs and
     // then stretch them. Draw text in device pixels at a whole-pixel size instead.
     Matrix transform;
@@ -156,8 +175,9 @@ inline void text(Graphics& g, const std::wstring& value, RectF area, float size,
     if (scaled) g.SetTransform(&transform);
 }
 
-inline void mainPanel(Graphics& g, float scale, const std::wstring& phase,
+inline void mainPanel(Gdiplus::Graphics& g, float scale, const std::wstring& phase,
                       const std::wstring& countdown, bool active, int focusedControl = 0) {
+    using namespace Gdiplus;
     setup(g);
     g.ScaleTransform(scale, scale);
     SolidBrush canvas(opaque(Background));
@@ -195,13 +215,14 @@ inline void mainPanel(Graphics& g, float scale, const std::wstring& phase,
     text(g, L"10%–95% · 越高遮挡越强", RectF(54, 340, 220, 25), 16, muted);
 
     auto inputBox = [&](RectF r, int id) {
-        const bool focused = focusedControl == id || (id == 104 && focusedControl == 105);
+        const bool focused = focusedControl == id ||
+            (id == controlId::OpacityEdit && focusedControl == controlId::OpacitySlider);
         box(g, r, 10, input, input, focused ? accent : Color(255, 207, 217, 205), focused ? 1.5f : 1.0f);
     };
-    inputBox(RectF(232, 190, 138, 48), 101);
-    inputBox(RectF(552, 190, 92, 48), 102);
-    inputBox(RectF(654, 190, 92, 48), 103);
-    inputBox(RectF(638, 326, 108, 44), 104);
+    inputBox(RectF(232, 190, 138, 48), controlId::WorkEdit);
+    inputBox(RectF(552, 190, 92, 48), controlId::RestMinEdit);
+    inputBox(RectF(654, 190, 92, 48), controlId::RestSecEdit);
+    inputBox(RectF(638, 326, 108, 44), controlId::OpacityEdit);
     text(g, L"分钟", RectF(321, 198, 43, 32), 17, muted);
     text(g, L"分", RectF(609, 198, 28, 32), 17, muted);
     text(g, L"秒", RectF(711, 198, 28, 32), 17, muted);
@@ -209,8 +230,9 @@ inline void mainPanel(Graphics& g, float scale, const std::wstring& phase,
     g.ResetTransform();
 }
 
-inline void checkBox(HDC dc, RectF bounds, const std::wstring& label, bool checked,
+inline void checkBox(HDC dc, Gdiplus::RectF bounds, const std::wstring& label, bool checked,
                      bool pressed, bool hover, bool focus) {
+    using namespace Gdiplus;
     Graphics g(dc);
     setup(g);
     g.Clear(opaque(Background));
@@ -234,8 +256,9 @@ inline void checkBox(HDC dc, RectF bounds, const std::wstring& label, bool check
          std::min(16.0f, bounds.Height * 0.52f), opaque(Foreground));
 }
 
-inline void stepper(HDC dc, RectF bounds, bool up, bool enabled,
+inline void stepper(HDC dc, Gdiplus::RectF bounds, bool up, bool enabled,
                     bool pressed, bool hover, bool focus) {
+    using namespace Gdiplus;
     Graphics g(dc);
     setup(g);
     g.Clear(opaque(EditBackground));
@@ -258,8 +281,9 @@ inline void stepper(HDC dc, RectF bounds, bool up, bool enabled,
     g.DrawLines(&pen, points, 3);
 }
 
-inline void button(HDC dc, RectF bounds, const std::wstring& label, bool primary,
+inline void button(HDC dc, Gdiplus::RectF bounds, const std::wstring& label, bool primary,
                    bool enabled, bool pressed, bool hover, bool focus) {
+    using namespace Gdiplus;
     Graphics g(dc);
     setup(g);
     g.Clear(opaque(Background));
@@ -284,12 +308,15 @@ inline void button(HDC dc, RectF bounds, const std::wstring& label, bool primary
          primary, StringAlignmentCenter);
 }
 
-inline void slider(HDC dc, int width, int height, unsigned opacity, bool focused) {
+inline void slider(HDC dc, int width, int height, unsigned opacity, bool focused,
+                   unsigned minOpacity = 10, unsigned maxOpacity = 95) {
+    using namespace Gdiplus;
     Graphics g(dc);
     setup(g);
     g.Clear(opaque(CardBackground));
     const float h = static_cast<float>(height), left = h * .5f, right = width - left;
-    const float x = left + (right - left) * (std::clamp(opacity, 10U, 95U) - 10) / 85.0f;
+    const float span = static_cast<float>(std::max(1U, maxOpacity - minOpacity));
+    const float x = left + (right - left) * (std::clamp(opacity, minOpacity, maxOpacity) - minOpacity) / span;
     Pen base(Color(255, 207, 220, 208), h * .13f);
     base.SetStartCap(LineCapRound); base.SetEndCap(LineCapRound);
     g.DrawLine(&base, left, h * .5f, right, h * .5f);
@@ -330,6 +357,7 @@ inline RECT restCardBounds(const RECT& monitor, UINT dpi) {
 class OverlayScene {
 public:
     void paintShade(HDC target, int width, int height) {
+        using namespace Gdiplus;
         const bool recreate = shade_.width() != width || shade_.height() != height;
         if (!shade_.resize(target, width, height)) return;
         if (recreate) {
@@ -344,6 +372,7 @@ public:
 
     const Surface* renderCard(HDC reference, int width, int height, const std::wstring& countdown,
                               float progress, std::uint64_t remainingMs, bool forced = false) {
+        using namespace Gdiplus;
         if (!card_.resize(reference, width, height)) return nullptr;
         // Draw directly into premultiplied pixels. ClearType/DC painting cannot preserve
         // alpha, and would leave a solid disc or black fringes on a layered window.

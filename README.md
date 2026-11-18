@@ -139,12 +139,13 @@ ctest --test-dir build -C Release --output-on-failure
 | --- | --- |
 | `tests/timer_tests.cpp` | 工作 / 休息切换、暂停恢复、跳过、睡眠恢复及淡入淡出边界 |
 | `tests/settings_tests.cpp` | 配置保存与加载、目录不可写回退、旧配置兼容、中文路径 |
+| `tests/startup_tests.cpp` | 开机自启命令生成、快捷方式回退与清理逻辑 |
 | `tests/overlay_tests.cpp` | 透明像素、圆环配色与线宽、DPI 定位、文案切换、提示层级 |
 | `tests/gui_smoke.ps1` | 真实窗口交互、设置恢复、遮罩、托盘与单实例行为 |
 | `tests/icon_resources.ps1` | EXE 内嵌图标资源 |
 | `tests/tray_menu.ps1` | 真实托盘菜单的项目与文案 |
 
-`build.bat` 会自动运行前三组测试；使用 CMake 时，可通过上面的 `ctest` 命令运行。
+`build.bat` 会自动运行前四组测试；使用 CMake 时，可通过上面的 `ctest` 命令运行。
 
 编译后，可在项目根目录运行图标验证和界面测试：
 
@@ -168,10 +169,11 @@ RestCue/
 ├── assets/                  # ICO、PNG 与可编辑 SVG 图标
 ├── tests/                   # 单元测试与 Windows 界面测试
 ├── tools/                   # 图标生成、离屏界面预览工具
-├── main.cpp                 # 窗口、输入、托盘、多显示器与自启逻辑
-├── theme.hpp                # 设置页、背景遮罩与透明圆环绘制
+├── main.cpp                 # 窗口、输入、托盘与多显示器协调逻辑
+├── theme.hpp                # 控件标识与布局、设置页、遮罩与透明圆环绘制
 ├── timer.hpp                # 计时状态机与淡入淡出计算
-├── settings_store.hpp       # 配置读写、回退与旧版兼容
+├── settings_store.hpp       # 配置校验、读写、回退与旧版兼容
+├── startup.hpp              # 开机自启注册表与快捷方式管理
 ├── resource.h               # 资源标识
 ├── restcue.rc               # 图标与版本资源
 ├── restcue.manifest         # Windows 应用清单
