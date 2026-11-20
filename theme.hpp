@@ -337,8 +337,9 @@ inline void slider(HDC dc, int width, int height, unsigned opacity, bool focused
 constexpr float RestCueWidth = 440, RestCueHeight = 500;
 constexpr float RestRingCenter = 220;
 
-inline const wchar_t* restCueCaption(std::uint64_t remainingMs) {
-    return remainingMs <= 15000 ? L"休息中 · 即将恢复" : L"休息一下，看看远处";
+inline const wchar_t* restCueCaption(std::uint64_t remainingMs, std::uint64_t durationMs = 45000) {
+    const auto leadMs = std::min<std::uint64_t>(15000, durationMs / 3);
+    return remainingMs <= leadMs ? L"眨眨眼，准备继续吧" : L"休息一下，看看远处";
 }
 
 inline RECT restCardBounds(const RECT& monitor, UINT dpi) {
@@ -371,7 +372,8 @@ public:
     }
 
     const Surface* renderCard(HDC reference, int width, int height, const std::wstring& countdown,
-                              float progress, std::uint64_t remainingMs, bool forced = false) {
+                              float progress, std::uint64_t remainingMs, bool forced = false,
+                              std::uint64_t durationMs = 45000) {
         using namespace Gdiplus;
         if (!card_.resize(reference, width, height)) return nullptr;
         // Draw directly into premultiplied pixels. ClearType/DC painting cannot preserve
@@ -399,7 +401,7 @@ public:
             g.DrawArc(&arc, center - radius, center - radius, radius * 2, radius * 2, -90.0f, sweep);
         text(g, countdown, RectF(18, 145, 404, 100), 84, Color(255, 255, 255, 255),
              true, StringAlignmentCenter, L"Segoe UI");
-        text(g, restCueCaption(remainingMs), RectF(30, 252, 380, 38), 24,
+        text(g, restCueCaption(remainingMs, durationMs), RectF(30, 252, 380, 38), 24,
              Color(224, 255, 255, 255), false, StringAlignmentCenter);
         const Color instruction(190, 255, 255, 255);
         if (!forced) {

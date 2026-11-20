@@ -798,9 +798,10 @@ void updateRestCue(HWND hwnd, BYTE alpha) {
     const int width = rect.right - rect.left, height = rect.bottom - rect.top;
     HDC screen = GetDC(nullptr);
     const auto remaining = app.timer.remaining(GetTickCount64());
+    const auto duration = std::max<std::uint64_t>(1, app.timer.restDuration());
     const auto* surface = state->scene.renderCard(screen, width, height, clockText(remaining),
-        static_cast<float>(remaining) / static_cast<float>(std::max<std::uint64_t>(1, app.timer.restDuration())),
-        remaining, boxChecked(ForceRest));
+        static_cast<float>(remaining) / static_cast<float>(duration),
+        remaining, boxChecked(ForceRest), duration);
     if (surface) {
         POINT destination{rect.left, rect.top}, source{0, 0};
         SIZE size{width, height};
@@ -818,9 +819,10 @@ void drawRestSurface(HWND hwnd, HDC dc) {
     if (!state) return;
     if (state->card) {
         const auto remaining = app.timer.remaining(GetTickCount64());
+        const auto duration = std::max<std::uint64_t>(1, app.timer.restDuration());
         const auto* surface = state->scene.renderCard(dc, client.right, client.bottom, clockText(remaining),
-            static_cast<float>(remaining) / static_cast<float>(std::max<std::uint64_t>(1, app.timer.restDuration())),
-            remaining, boxChecked(ForceRest));
+            static_cast<float>(remaining) / static_cast<float>(duration),
+            remaining, boxChecked(ForceRest), duration);
         if (surface) BitBlt(dc, 0, 0, client.right, client.bottom, surface->dc(), 0, 0, SRCCOPY);
     } else {
         state->scene.paintShade(dc, client.right, client.bottom);

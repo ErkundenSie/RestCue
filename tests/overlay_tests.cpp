@@ -33,8 +33,10 @@ int main() {
     }
     expect(std::wstring(restCueCaption(300000)) == L"休息一下，看看远处", "long rests use a relaxed message");
     expect(std::wstring(restCueCaption(15001)) == L"休息一下，看看远处", "recovery message is not shown early");
-    expect(std::wstring(restCueCaption(15000)) == L"休息中 · 即将恢复", "recovery message starts in the last 15 seconds");
-    expect(std::wstring(restCueCaption(0)) == L"休息中 · 即将恢复", "recovery message remains stable at the endpoint");
+    expect(std::wstring(restCueCaption(15000)) == L"眨眨眼，准备继续吧", "recovery message starts in the last 15 seconds");
+    expect(std::wstring(restCueCaption(0)) == L"眨眨眼，准备继续吧", "recovery message remains stable at the endpoint");
+    expect(std::wstring(restCueCaption(9000, 10000)) == L"休息一下，看看远处", "short rests show primary prompt first");
+    expect(std::wstring(restCueCaption(3000, 10000)) == L"眨眨眼，准备继续吧", "short rests switch in the final third");
     HDC dc = GetDC(nullptr);
     OverlayScene scene;
     Surface shade;
